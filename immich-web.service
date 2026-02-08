@@ -18,5 +18,7 @@ SyslogIdentifier=immich-web
 StandardOutput=append:/var/log/immich/web.log
 StandardError=append:/var/log/immich/web.log
 
+SupplementaryGroups=video render
+
 [Install]
 WantedBy=multi-user.target
