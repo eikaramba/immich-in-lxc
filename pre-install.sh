@@ -439,17 +439,14 @@ build_libvips () {
 # -------------------
 
 remove_build_dependency () {
+    # NOTE: Do NOT remove packages that sharp/node-gyp needs to compile against libvips.
+    # The following are safe to remove after the image libraries are built:
     apt-get remove -y \
-        libbrotli-dev \
-        libde265-dev \
-        libexif-dev \
-        libexpat1-dev \
-        libgsf-1-dev \
-        liblcms2-2 \
-        librsvg2-dev \
-        libspng-dev \
         libheif-dev \
         libvips-dev
+    # Intentionally keeping: libexif-dev, libexpat1-dev, libspng-dev, librsvg2-dev,
+    # libglib2.0-dev, liblcms2-dev, libgsf-1-dev, libbrotli-dev, libde265-dev, etc.
+    # These are required by pkg-config when sharp builds against system libvips.
 
 # Manually finding what is safe to remove
 # and woun't be needed by install.sh which builds sharp from source

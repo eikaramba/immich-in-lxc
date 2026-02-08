@@ -266,6 +266,22 @@ install_immich_web_server_pnpm () {
         pnpm config set registry=$PROXY_NPM
     fi
 
+    # Build phase: ignore global libvips so pnpm install doesn't try to link sharp yet
+    export SHARP_IGNORE_GLOBAL_LIBVIPS=true
+    pnpm --filter immich --frozen-lockfile build
+    unset SHARP_IGNORE_GLOBAL_LIBVIPS
+
+    # SDK + web build
+    pnpm --filter @immich/sdk --filter immich-web --frozen-lockfile build
+
+    # Deploy phase: force using system libvips
+    export SHARP_FORCE_GLOBAL_LIBVIPS=true
+    pnpm --filter immich --prod deploy "$INSTALL_DIR_app"
+    unset SHARP_FORCE_GLOBAL_LIBVIPS
+
+    # Rebuild sharp in the deployed directory against system libvips
+    (cd $INSTALL_DIR_app; pnpm rebuild sharp)
+
     # Install dependencies
     pnpm install --frozen-lockfile
 
