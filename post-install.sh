@@ -37,7 +37,7 @@ create_log_directory
 # -------------------
 
 create_system_symlinks () {
-    local INSTALL_DIR="/home/immich"
+    local INSTALL_DIR="/home/immich/immich"
 
     # Read from .env if available
     if [[ -f ".env" ]]; then

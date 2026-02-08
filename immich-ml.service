@@ -9,9 +9,9 @@ Type=simple
 Restart=on-failure
 UMask=0077
 
-WorkingDirectory=/home/immich/app
-EnvironmentFile=/home/immich/runtime.env
-ExecStart=/home/immich/app/machine-learning/start.sh
+WorkingDirectory=/home/immich/immich/app
+EnvironmentFile=/home/immich/immich/runtime.env
+ExecStart=/home/immich/immich/app/machine-learning/start.sh
 
 SyslogIdentifier=immich-machine-learning
 StandardOutput=append:/var/log/immich/ml.log
