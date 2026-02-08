@@ -496,6 +496,7 @@ add_runtime_dependency () {
         libopenjp2-7 \
         librsvg2-2 \
         libspng0 \
+        migraphx \
         mesa-utils \
         mesa-va-drivers \
         mesa-vulkan-drivers \

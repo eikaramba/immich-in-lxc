@@ -393,11 +393,11 @@ install_immich_machine_learning () {
     elif [ $isCUDA = "openvino" ]; then
         poetry install --no-root --extras openvino
     elif [ $isCUDA = "rocm" ]; then
-        # https://rocm.docs.amd.com/projects/radeon/en/latest/docs/install/native_linux/install-onnx.html
-        pip3 install onnxruntime-rocm -f https://repo.radeon.com/rocm/manylinux/rocm-rel-6.4.1/
+        # https://rocm.docs.amd.com/projects/radeon-ryzen/en/latest/docs/install/installrad/native_linux/install-onnx.html
+        pip3 install onnxruntime-migraphx -f https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2/
         # Verify installation
         python3 -c "import onnxruntime as ort; print(ort.get_available_providers())"
-        # ROCm needs numpy < 2 [workaround](https://rocm.docs.amd.com/projects/radeon/en/latest/docs/install/native_linux/install-onnx.html)
+        # ROCm needs numpy < 2 [workaround](https://rocm.docs.amd.com/projects/radeon-ryzen/en/latest/docs/install/installrad/native_linux/install-onnx.html)
         pip install "numpy<2" -i $PROXY_POETRY
     else
         poetry install --no-root --extras cpu
