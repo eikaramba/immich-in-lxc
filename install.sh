@@ -477,31 +477,58 @@ install_ml_with_uv () {
     if [ "$isCUDA" = true ]; then
         uv sync --extra cuda --no-dev --active --link-mode copy -n -p "python${PYTHON_VERSION}"
     elif [ "$isCUDA" = "rocm" ]; then
-        # Install base dependencies first
+        # Source ROCm environment
+        if [[ -f /etc/profile.d/rocm.sh ]]; then
+            # shellcheck disable=SC1091
+            source /etc/profile.d/rocm.sh
+        fi
+
+        # Install base ML dependencies (this installs CPU onnxruntime)
         uv sync --extra cpu --no-dev --active --link-mode copy -n -p "python${PYTHON_VERSION}"
 
-        # Then install ROCm-specific ONNX runtime USING THE VENV's Python
-        # We must use the venv python directly — system pip is blocked by PEP 668
+        # Replace CPU onnxruntime with MIGraphX version inside the venv
         (
             . "$VIRTUAL_ENV/bin/activate"
 
-            # Ensure pip is available inside the venv
+            # Ensure pip is available inside the uv-created venv
             python3 -m ensurepip --upgrade 2>/dev/null || uv pip install pip
 
-            # Install ROCm ONNX runtime
-            python3 -m pip install onnxruntime-migraphx \
+            # Step 1: Uninstall CPU-only onnxruntime (conflicts with migraphx)
+            python3 -m pip uninstall -y onnxruntime 2>/dev/null || true
+
+            # Step 2: Clean up any leftover onnxruntime namespace directories
+            local site_pkgs
+            site_pkgs="$(python3 -c 'import site; print(site.getsitepackages()[0])')"
+            if [[ -d "$site_pkgs/onnxruntime" ]]; then
+                rm -rf "$site_pkgs/onnxruntime"
+                rm -rf "$site_pkgs"/onnxruntime-*.dist-info
+            fi
+
+            # Step 3: Install onnxruntime-migraphx from AMD repo
+            python3 -m pip install --no-cache-dir onnxruntime-migraphx \
                 -f https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2/
 
-            # Verify
-            python3 -c "import onnxruntime as ort; print('Available providers:', ort.get_available_providers())"
-
-            # ROCm needs numpy < 2
+            # Step 4: Pin numpy < 2 (ROCm requirement, migraphx pulls numpy 2.x)
             python3 -m pip install "numpy<2"
+
+            # Step 5: Verify MIGraphX provider is available
+            echo "Verifying ROCm ML setup..."
+            python3 -c "
+import onnxruntime as ort
+providers = ort.get_available_providers()
+print('Available providers:', providers)
+if 'MIGraphXExecutionProvider' not in providers:
+    print('WARNING: MIGraphXExecutionProvider not found!')
+    exit(1)
+else:
+    print('SUCCESS: MIGraphX provider is available')
+"
         )
     else
         uv sync --extra cpu --no-dev --active --link-mode copy -n -p "python${PYTHON_VERSION}"
     fi
 }
+
 
 
 
@@ -531,11 +558,42 @@ install_ml_with_poetry () {
         if [ "$isCUDA" = true ]; then
             poetry install --no-root --extras cuda
         elif [ "$isCUDA" = "rocm" ]; then
+            # Source ROCm environment
+            if [[ -f /etc/profile.d/rocm.sh ]]; then
+                # shellcheck disable=SC1091
+                source /etc/profile.d/rocm.sh
+            fi
+
+            # Install base CPU dependencies
             poetry install --no-root --extras cpu
-            python3 -m pip install onnxruntime-migraphx \
+
+            # Remove CPU onnxruntime and clean up leftovers
+            python3 -m pip uninstall -y onnxruntime 2>/dev/null || true
+            local site_pkgs
+            site_pkgs="$(python3 -c 'import site; print(site.getsitepackages()[0])')"
+            if [[ -d "$site_pkgs/onnxruntime" ]]; then
+                rm -rf "$site_pkgs/onnxruntime"
+                rm -rf "$site_pkgs"/onnxruntime-*.dist-info
+            fi
+
+            # Install MIGraphX version
+            python3 -m pip install --no-cache-dir onnxruntime-migraphx \
                 -f https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2/
-            python3 -c "import onnxruntime as ort; print('Available providers:', ort.get_available_providers())"
-            python3 -m pip install "numpy<2" -i "$PROXY_POETRY"
+
+            # Pin numpy < 2
+            python3 -m pip install "numpy<2"
+
+            # Verify
+            python3 -c "
+import onnxruntime as ort
+providers = ort.get_available_providers()
+print('Available providers:', providers)
+if 'MIGraphXExecutionProvider' not in providers:
+    print('WARNING: MIGraphXExecutionProvider not found!')
+    exit(1)
+else:
+    print('SUCCESS: MIGraphX provider is available')
+"
         else
             poetry install --no-root --extras cpu
         fi
@@ -545,6 +603,7 @@ install_ml_with_poetry () {
         fi
     )
 }
+
 
 
 
