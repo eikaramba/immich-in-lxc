@@ -190,12 +190,6 @@ review_dependency () {
         fi
     fi
 
-    if [ "$isCUDA" = "rocm" ]; then
-        if ! rocminfo &> /dev/null 2>&1; then
-            echo "WARNING: rocminfo not found. Make sure ROCm drivers are properly installed."
-        fi
-    fi
-
     echo "Dependency check passed!"
 }
 
@@ -205,7 +199,7 @@ review_dependency () {
 # -------------------
 
 enable_maintenance_mode () {
-    if [[ -f "$INSTALL_DIR_app/bin/immich-admin" ]]; then
+    if [[ -f "$INSTALL_DIR_app/bin/immich-admin" && -f "$INSTALL_DIR/runtime.env" ]]; then
         echo "Enabling maintenance mode..."
         (
             set -a
@@ -215,8 +209,11 @@ enable_maintenance_mode () {
             node ./immich-admin enable-maintenance-mode 2>/dev/null || true
         )
         export MAINT_MODE=1
+    else
+        echo "Skipping maintenance mode (first install or runtime.env not found)."
     fi
 }
+
 
 
 # -------------------
@@ -224,7 +221,7 @@ enable_maintenance_mode () {
 # -------------------
 
 disable_maintenance_mode () {
-    if [[ "${MAINT_MODE:-0}" == "1" && -f "$INSTALL_DIR_app/bin/immich-admin" ]]; then
+    if [[ "${MAINT_MODE:-0}" == "1" && -f "$INSTALL_DIR_app/bin/immich-admin" && -f "$INSTALL_DIR/runtime.env" ]]; then
         echo "Disabling maintenance mode..."
         (
             set -a
@@ -236,6 +233,7 @@ disable_maintenance_mode () {
         unset MAINT_MODE
     fi
 }
+
 
 
 # -------------------
@@ -313,6 +311,13 @@ install_immich_web_server_pnpm () {
     export CI=1
     corepack enable 2>/dev/null || true
 
+    # ============================================================
+    # FIX: Increase Node.js heap size for Vite/Svelte web build
+    # Default is ~1.7 GB which is insufficient for the web build.
+    # Adjust the value based on your available RAM.
+    # ============================================================
+    export NODE_OPTIONS="--max-old-space-size=8192"
+
     # Install dependencies
     pnpm install --frozen-lockfile
 
@@ -389,6 +394,9 @@ install_immich_web_server_pnpm () {
     if [ -n "${PROXY_NPM}" ]; then
         pnpm config delete registry
     fi
+
+    # Clean up NODE_OPTIONS after build is done
+    unset NODE_OPTIONS
 }
 
 
@@ -471,18 +479,30 @@ install_ml_with_uv () {
     elif [ "$isCUDA" = "rocm" ]; then
         # Install base dependencies first
         uv sync --extra cpu --no-dev --active --link-mode copy -n -p "python${PYTHON_VERSION}"
-        # Then install ROCm-specific ONNX runtime
+
+        # Then install ROCm-specific ONNX runtime USING THE VENV's Python
+        # We must use the venv python directly — system pip is blocked by PEP 668
         (
             . "$VIRTUAL_ENV/bin/activate"
-            pip3 install onnxruntime-migraphx -f https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2/
+
+            # Ensure pip is available inside the venv
+            python3 -m ensurepip --upgrade 2>/dev/null || uv pip install pip
+
+            # Install ROCm ONNX runtime
+            python3 -m pip install onnxruntime-migraphx \
+                -f https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2/
+
+            # Verify
             python3 -c "import onnxruntime as ort; print('Available providers:', ort.get_available_providers())"
+
             # ROCm needs numpy < 2
-            pip install "numpy<2"
+            python3 -m pip install "numpy<2"
         )
     else
         uv sync --extra cpu --no-dev --active --link-mode copy -n -p "python${PYTHON_VERSION}"
     fi
 }
+
 
 
 install_ml_with_poetry () {
@@ -493,17 +513,15 @@ install_ml_with_poetry () {
     (
         . "$INSTALL_DIR_ml/venv/bin/activate"
 
-        # Use pypi if proxy does not present
         if [ -z "${PROXY_POETRY}" ]; then
             PROXY_POETRY=https://pypi.org/simple/
         fi
-        pip3 install poetry -i "$PROXY_POETRY"
+        python3 -m pip install poetry -i "$PROXY_POETRY"
 
         if [ -n "${PROXY_POETRY}" ]; then
             poetry source add --priority=primary langsam "$PROXY_POETRY"
         fi
 
-        # Deal with python 3.12
         python3_version=$(python3 --version 2>&1 | awk -F' ' '{print $2}' | awk -F'.' '{print $2}')
         if [ "$python3_version" = 12 ]; then
             sed -i -e 's/<3.12/<4/g' pyproject.toml
@@ -514,9 +532,10 @@ install_ml_with_poetry () {
             poetry install --no-root --extras cuda
         elif [ "$isCUDA" = "rocm" ]; then
             poetry install --no-root --extras cpu
-            pip3 install onnxruntime-migraphx -f https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2/
+            python3 -m pip install onnxruntime-migraphx \
+                -f https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2/
             python3 -c "import onnxruntime as ort; print('Available providers:', ort.get_available_providers())"
-            pip install "numpy<2" -i "$PROXY_POETRY"
+            python3 -m pip install "numpy<2" -i "$PROXY_POETRY"
         else
             poetry install --no-root --extras cpu
         fi
@@ -526,6 +545,7 @@ install_ml_with_poetry () {
         fi
     )
 }
+
 
 
 # -------------------
