@@ -2,7 +2,6 @@
 
 # -------------------
 # Include helper functions
-# Such as git git_checkout_repo
 # -------------------
 source "./helpers.sh"
 
@@ -18,9 +17,7 @@ check_services_off() {
     )
 
     for svc in "${services[@]}"; do
-        # Does the unit exist?
-        if systemctl list-unit-files --type=service | grep -q "^${svc}"; then
-            # Unit exists — check if running
+        if systemctl list-unit-files --type=service 2>/dev/null | grep -q "^${svc}"; then
             if systemctl is-active --quiet "$svc"; then
                 echo "Service $svc is RUNNING — expected OFF."
                 echo "To stop services (as root):"
@@ -30,7 +27,6 @@ check_services_off() {
                 echo "Service $svc exists and is OFF."
             fi
         else
-            # Unit not found — treat as safely off
             echo "Service $svc does not exist yet — treating as OFF."
         fi
     done
@@ -51,13 +47,12 @@ check_user_id () {
 
 
 # -------------------
-# Create env file if it does not exists
+# Create env file if it does not exist
 # -------------------
 SCRIPT_DIR=$PWD
 
 create_install_env_file () {
-    # Check if env file exists
-    if [ ! -f $SCRIPT_DIR/.env ]; then
+    if [ ! -f "$SCRIPT_DIR/.env" ]; then
         echo "Error: .env file not found"
         echo "Create one by modifying an example file example.env"
         echo "cp example.env .env"
@@ -71,8 +66,7 @@ create_install_env_file () {
 # -------------------
 
 load_environment_variables () {
-    # Read the .env file into variables
-    cd $SCRIPT_DIR
+    cd "$SCRIPT_DIR"
     set -a
     . ./.env
     set +a
@@ -99,95 +93,149 @@ set_common_variables () {
 # -------------------
 
 review_install_information () {
-    echo ------------------Installation Configuration from .env------------------
-    # Install Version
-    echo Desired version: $REPO_TAG
-    # Install Location
-    echo Install Location: $INSTALL_DIR
-    # Upload Location
-    echo Upload Location: $UPLOAD_DIR
-    # Cuda or CPU
-    echo isCUDA: $isCUDA
-    # npm proxy
-    echo PROXY_NPM: $PROXY_NPM
-    # npm dist proxy (used by node-gyp)
-    echo PROXY_NPM_DIST: $PROXY_NPM_DIST
-    # poetry proxy
-    echo PROXY_POETRY: $PROXY_POETRY
+    echo "------------------Installation Configuration from .env------------------"
+    echo "Desired version: $REPO_TAG"
+    echo "Install Location: $INSTALL_DIR"
+    echo "Upload Location: $UPLOAD_DIR"
+    echo "isCUDA: $isCUDA"
+    echo "PROXY_NPM: $PROXY_NPM"
+    echo "PROXY_NPM_DIST: $PROXY_NPM_DIST"
+    echo "PROXY_POETRY: $PROXY_POETRY"
     echo
 }
 
 
 # -------------------
-# Check if node are installed
+# Check if node is installed
 # -------------------
 
 install_node () {
-    # node.js
     if ! command -v node &> /dev/null; then
         echo "ERROR: Node.js is not installed."
         echo "Installing Node.js for current user"
         curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash
         \. "$HOME/.nvm/nvm.sh"
-        # use $PROXY_NPM_DIST 
         NVM_NODEJS_ORG_MIRROR=$PROXY_NPM_DIST
-        nvm install --lts
-        echo "Finish installing latest LTS node"
+        nvm install 24
+        echo "Finish installing Node.js 24"
+    fi
+
+    # Source nvm in case it's a fresh shell
+    export NVM_DIR="$HOME/.nvm"
+    [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+
+    # Get required pnpm version from source package.json if available
+    local PNPM_VERSION="10"
+    if [[ -f "$INSTALL_DIR_src/package.json" ]]; then
+        local PKG_PNPM
+        PKG_PNPM="$(jq -r '.packageManager // empty' "$INSTALL_DIR_src/package.json" | grep -oP '[\d.]+')" || true
+        if [[ -n "$PKG_PNPM" ]]; then
+            PNPM_VERSION="$PKG_PNPM"
+        fi
     fi
 
     if ! command -v pnpm &> /dev/null; then
-        echo "Installing pnpm"
-        npm install -g pnpm@10
+        echo "Installing pnpm@${PNPM_VERSION}"
+        npm install -g "pnpm@${PNPM_VERSION}"
     fi
-    echo ------------------Current versions------------------
-    echo "npm version: {$(npm -v)}"
-    echo "node version: {$(node -v)}"
-    echo "pnpm version: {$(pnpm -v)}"
+
+    echo "------------------Current versions------------------"
+    echo "npm version: $(npm -v)"
+    echo "node version: $(node -v)"
+    echo "pnpm version: $(pnpm -v)"
     echo
 }
 
 
 # -------------------
-# Check if dependency are met
+# Check if dependencies are met
 # -------------------
 
 review_dependency () {
-    # ffmpeg
     if ! command -v ffmpeg &> /dev/null; then
         echo "ERROR: ffmpeg is not installed."
         echo "Please run pre-install.sh first"
         exit 1
     fi
 
-    # node.js
     if ! command -v node &> /dev/null; then
         echo "ERROR: Node.js is not installed."
         exit 1
     fi
 
-    # python3
     if ! command -v python3 &> /dev/null; then
         echo "ERROR: Python is not installed."
         exit 1
     fi
 
-    # git
     if ! command -v git &> /dev/null; then
         echo "ERROR: Git is not installed."
         exit 1
     fi
 
-    # (Optional) Nvidia Driver
-    if [ $isCUDA = true ]; then
+    # Check for uv
+    if ! command -v uv &> /dev/null; then
+        # Try sourcing the path
+        export PATH="$HOME/.local/bin:$PATH"
+        if ! command -v uv &> /dev/null; then
+            echo "WARNING: uv is not installed. Falling back to poetry for ML install."
+            echo "Install uv for faster ML dependency resolution: curl -LsSf https://astral.sh/uv/install.sh | sh"
+        fi
+    fi
+
+    if [ "$isCUDA" = true ]; then
         if ! nvidia-smi &> /dev/null; then
             echo "ERROR: Nvidia driver is not installed, and isCUDA is set to true"
             exit 1
         fi
     fi
 
+    if [ "$isCUDA" = "rocm" ]; then
+        if ! rocminfo &> /dev/null 2>&1; then
+            echo "WARNING: rocminfo not found. Make sure ROCm drivers are properly installed."
+        fi
+    fi
+
     echo "Dependency check passed!"
 }
 
+
+# -------------------
+# Enable maintenance mode if upgrading
+# -------------------
+
+enable_maintenance_mode () {
+    if [[ -f "$INSTALL_DIR_app/bin/immich-admin" ]]; then
+        echo "Enabling maintenance mode..."
+        (
+            set -a
+            . "$INSTALL_DIR/runtime.env"
+            set +a
+            cd "$INSTALL_DIR_app/bin"
+            node ./immich-admin enable-maintenance-mode 2>/dev/null || true
+        )
+        export MAINT_MODE=1
+    fi
+}
+
+
+# -------------------
+# Disable maintenance mode after upgrade
+# -------------------
+
+disable_maintenance_mode () {
+    if [[ "${MAINT_MODE:-0}" == "1" && -f "$INSTALL_DIR_app/bin/immich-admin" ]]; then
+        echo "Disabling maintenance mode..."
+        (
+            set -a
+            . "$INSTALL_DIR/runtime.env"
+            set +a
+            cd "$INSTALL_DIR_app/bin"
+            node ./immich-admin disable-maintenance-mode 2>/dev/null || true
+        )
+        unset MAINT_MODE
+    fi
+}
 
 
 # -------------------
@@ -196,31 +244,26 @@ review_dependency () {
 
 clean_previous_build () {
     confirm_destruction "$INSTALL_DIR_app"
-    rm -rf $INSTALL_DIR_app
+    rm -rf "$INSTALL_DIR_app"
 }
 
 
 # -------------------
-# Common variables
+# Create folders
 # -------------------
 
 create_folders () {
-    # No need to create source folder
-    mkdir -p $INSTALL_DIR_app
+    mkdir -p "$INSTALL_DIR_app"
 
-    # Upload directory
     if [ ! -d "$UPLOAD_DIR" ]; then
-        echo "$UPLOAD_DIR does not exists, creating one"
-        mkdir -p $UPLOAD_DIR
+        echo "$UPLOAD_DIR does not exist, creating one"
+        mkdir -p "$UPLOAD_DIR"
     else
         echo "$UPLOAD_DIR already exists, skip creation"
     fi
 
-    # GeoNames
-    mkdir -p $INSTALL_DIR_geo
-
-    # Create a temporary folder for the json files
-    mkdir -p $TMP_DIR
+    mkdir -p "$INSTALL_DIR_geo"
+    mkdir -p "$TMP_DIR"
 }
 
 # -------------------
@@ -230,8 +273,8 @@ create_folders () {
 git_patch () {
     if [ -d "$SCRIPT_DIR/git-patches/$REPO_TAG" ]; then
         (
-            cd $INSTALL_DIR_src
-            git apply $SCRIPT_DIR/git-patches/$REPO_TAG/*.patch
+            cd "$INSTALL_DIR_src"
+            git apply "$SCRIPT_DIR/git-patches/$REPO_TAG"/*.patch
         )
     fi
 }
@@ -240,7 +283,7 @@ git_patch () {
 # Remove mise tools that we do not need for server install
 # -------------------
 mise_local_override() {
-    cd $INSTALL_DIR_src
+    cd "$INSTALL_DIR_src"
 
     cat > mise.local.toml <<'EOF'
 [settings]
@@ -251,7 +294,6 @@ disable_tools = [
   "terragrunt"
 ]
 EOF
-
 }
 
 # -------------------
@@ -259,79 +301,92 @@ EOF
 # -------------------
 
 install_immich_web_server_pnpm () {
-    cd $INSTALL_DIR_src
+    cd "$INSTALL_DIR_src"
 
     # Set mirror for pnpm (if needed)
-    if [ ! -z "${PROXY_NPM}" ]; then
-        pnpm config set registry=$PROXY_NPM
+    if [ -n "${PROXY_NPM}" ]; then
+        pnpm config set registry="$PROXY_NPM"
     fi
 
-    # Build phase: ignore global libvips so pnpm install doesn't try to link sharp yet
-    export SHARP_IGNORE_GLOBAL_LIBVIPS=true
-    pnpm --filter immich --frozen-lockfile build
-    unset SHARP_IGNORE_GLOBAL_LIBVIPS
-
-    # SDK + web build
-    pnpm --filter @immich/sdk --filter immich-web --frozen-lockfile build
-
-    # Deploy phase: force using system libvips
-    export SHARP_FORCE_GLOBAL_LIBVIPS=true
-    pnpm --filter immich --prod deploy "$INSTALL_DIR_app"
-    unset SHARP_FORCE_GLOBAL_LIBVIPS
-
-    # Rebuild sharp in the deployed directory against system libvips
-    (cd $INSTALL_DIR_app; pnpm rebuild sharp)
+    # Enable corepack for consistent pnpm version
+    export COREPACK_ENABLE_DOWNLOAD_PROMPT=0
+    export CI=1
+    corepack enable 2>/dev/null || true
 
     # Install dependencies
     pnpm install --frozen-lockfile
 
-    # Use global LibVips - happens by default no flags needed
+    # --- Phase 1: Build (ignore global libvips so pnpm install doesn't try to link sharp prematurely) ---
+    export SHARP_IGNORE_GLOBAL_LIBVIPS=true
     pnpm --filter immich --frozen-lockfile build
+    unset SHARP_IGNORE_GLOBAL_LIBVIPS
 
-    # Build SDK
+    # --- Phase 2: Deploy with system libvips ---
+    export SHARP_FORCE_GLOBAL_LIBVIPS=true
+
+    # Build SDK + web
     pnpm --filter @immich/sdk --filter immich-web --frozen-lockfile build
 
-    # Build and deploy the server component.
-    # This part does not copy does not copy prebuilt sharp 
-    #   which is built against our system.
-    pnpm --filter immich --prod deploy "$INSTALL_DIR_app"
-    # So we are rebuilding Sharp again that it links correctly
-    (cd $INSTALL_DIR_app; pnpm add sharp --allow-build=sharp; pnpm rebuild sharp)
+    # Deploy the server component using system libvips
+    pnpm --filter immich --prod --frozen-lockfile --no-optional deploy "$INSTALL_DIR_app"
 
-    # Build and deploy the CLI.
-    pnpm --filter @immich/cli --frozen-lockfile --prod --no-optional deploy $INSTALL_DIR_app/cli
+    # Rebuild sharp in the deployed directory against system libvips
+    (cd "$INSTALL_DIR_app"; pnpm rebuild sharp)
 
-    ln -s ../cli/bin/immich $INSTALL_DIR_app/bin/immich
+    unset SHARP_FORCE_GLOBAL_LIBVIPS
 
-    # Copy the built Web UI to the target directory.
-    cp -a web/build $INSTALL_DIR_app/www
+    # Build and deploy the CLI
+    pnpm --filter @immich/cli --frozen-lockfile --prod --no-optional deploy "$INSTALL_DIR_app/cli"
 
-    cp -a LICENSE $INSTALL_DIR_app/
-    cp -a i18n $INSTALL_DIR/
-    cp -a server/bin/get-cpus.sh server/bin/start.sh $INSTALL_DIR_app/
+    ln -sf ../cli/bin/immich "$INSTALL_DIR_app/bin/immich"
 
-    # Build plugins v2.3.0 +
-    npm install -g @jdxcode/mise
+    # Copy the built Web UI to the target directory
+    cp -a web/build "$INSTALL_DIR_app/www"
 
+    cp -a LICENSE "$INSTALL_DIR_app/"
+    cp -a i18n "$INSTALL_DIR/"
+    cp -a server/bin/get-cpus.sh server/bin/start.sh "$INSTALL_DIR_app/"
+
+    # Copy package.json to bin for immich-admin
+    cp "$INSTALL_DIR_app/package.json" "$INSTALL_DIR_app/bin/" 2>/dev/null || true
+
+    # Fix immich-admin path
+    if [[ -f "$INSTALL_DIR_app/bin/immich-admin" ]]; then
+        sed -i "s|^start|${INSTALL_DIR_app}/bin/start|" "$INSTALL_DIR_app/bin/immich-admin" 2>/dev/null || true
+    fi
+
+    # Build plugins (v2.3.0+)
     if [ -d "plugins" ]; then
         (
             cd plugins
             pnpm install
-            mise trust --all --yes
-            mise build
+
+            # Use mise if available (installed from APT in pre-install)
+            if command -v mise &> /dev/null; then
+                mise trust --all --yes 2>/dev/null || true
+                mise trust ./mise.toml 2>/dev/null || true
+                mise install 2>/dev/null || true
+                mise run build 2>/dev/null || pnpm run build 2>/dev/null || true
+            else
+                # Fallback: try npm-installed mise
+                if command -v npx &> /dev/null; then
+                    npx @jdxcode/mise trust --all --yes 2>/dev/null || true
+                    npx @jdxcode/mise build 2>/dev/null || true
+                fi
+            fi
         )
 
-        # Trust
-        # Copy results to app folder.
-        mkdir -p ./app/corePlugin
-        cp -a ./plugins/dist "$INSTALL_DIR_app/corePlugin"
-        cp -a ./plugins/manifest.json "$INSTALL_DIR_app/corePlugin/manifest.json"
+        mkdir -p "$INSTALL_DIR_app/corePlugin"
+        if [ -d "./plugins/dist" ]; then
+            cp -a ./plugins/dist "$INSTALL_DIR_app/corePlugin/"
+            cp -a ./plugins/manifest.json "$INSTALL_DIR_app/corePlugin/manifest.json"
+        fi
     else
         echo "plugins directory not found — skipping plugin build."
     fi
 
     # Unset mirror for pnpm (if it was set)
-    if [ ! -z "${PROXY_NPM}" ]; then
+    if [ -n "${PROXY_NPM}" ]; then
         pnpm config delete registry
     fi
 }
@@ -342,95 +397,134 @@ install_immich_web_server_pnpm () {
 # -------------------
 
 generate_build_lock () {
-    # Resolve Nest's Warning "Failed to read /home/immich/app/build-lock.json"
-    cd $SCRIPT_DIR
+    cd "$SCRIPT_DIR"
 
     REPO_URL_BASE_IMG="https://github.com/immich-app/base-images"
 
-    tag=$(grep -oP '(?<=immich-app/base-server-dev:)[0-9]+' $INSTALL_DIR_app/Dockerfile)
+    tag=$(grep -oP '(?<=immich-app/base-server-dev:)[0-9]+' "$INSTALL_DIR_app/Dockerfile" 2>/dev/null || echo "")
+
+    if [[ -z "$tag" ]]; then
+        echo "WARNING: Could not extract base-server-dev tag from Dockerfile. Trying 'main'..."
+        tag="main"
+    fi
 
     if [ -d base-images/.git ]; then
         echo "Updating existing base-images repo..."
         git -C base-images fetch --tags
-        git -C base-images checkout "$tag" || git -C base-images fetch origin "refs/tags/$tag:refs/tags/$tag" && git -C base-images checkout "$tag"
+        git -C base-images checkout "$tag" || {
+            git -C base-images fetch origin "refs/tags/$tag:refs/tags/$tag"
+            git -C base-images checkout "$tag"
+        }
     else
         echo "Cloning fresh base-images repo at tag $tag..."
-        safe_git_checkout "$REPO_URL_BASE_IMG" . "$tag"
+        safe_git_checkout "$REPO_URL_BASE_IMG" base-images "$tag"
     fi
 
     cd base-images/server/
 
-    # From base-images/server/Dockerfile line 110
-    jq -s '.' packages/*.json > $TMP_DIR/packages.json
-    jq -s '.' sources/*.json > $TMP_DIR/sources.json
+    jq -s '.' packages/*.json > "$TMP_DIR/packages.json"
+    jq -s '.' sources/*.json > "$TMP_DIR/sources.json"
     jq -n \
-        --slurpfile sources $TMP_DIR/sources.json \
-        --slurpfile packages $TMP_DIR/packages.json \
+        --slurpfile sources "$TMP_DIR/sources.json" \
+        --slurpfile packages "$TMP_DIR/packages.json" \
         '{sources: $sources[0], packages: $packages[0]}' \
-        > $INSTALL_DIR_app/build-lock.json
+        > "$INSTALL_DIR_app/build-lock.json"
 }
 
 
 # -------------------
-# Install Immich-machine-learning
+# Install Immich-machine-learning (using uv if available, fallback to poetry)
 # -------------------
 
 install_immich_machine_learning () {
-    cd $INSTALL_DIR_src/machine-learning
-    python3 -m venv $INSTALL_DIR_ml/venv
-    (
-    # Initiate subshell to setup venv
-    . $INSTALL_DIR_ml/venv/bin/activate
+    cd "$INSTALL_DIR_src/machine-learning"
 
-    # Use pypi if proxy does not present
-    if [ -z "${PROXY_POETRY}" ]; then
-        PROXY_POETRY=https://pypi.org/simple/  
-    fi
-    pip3 install poetry -i $PROXY_POETRY
+    # Ensure uv is in PATH
+    export PATH="$HOME/.local/bin:$PATH"
 
-    # Set PROXY_POETRY as the primary source to download package from
-    # https://python-poetry.org/docs/repositories/#primary-package-sources
-    if [ ! -z "${PROXY_POETRY}" ]; then
-        # langsam literally means slow
-        poetry source add --priority=primary langsam $PROXY_POETRY
-    fi
-
-    # Deal with python 3.12
-    python3_version=$(python3 --version 2>&1 | awk -F' ' '{print $2}' | awk -F'.' '{print $2}')
-    if [ $python3_version = 12 ]; then
-        # Allow Python 3.12 (e.g., Ubuntu 24.04)
-        sed -i -e 's/<3.12/<4/g' pyproject.toml
-        poetry update
-    fi
-    
-    # Install CUDA parts only when necessary
-    if [ $isCUDA = true ]; then
-        poetry install --no-root --extras cuda
-    elif [ $isCUDA = "openvino" ]; then
-        poetry install --no-root --extras openvino
-    elif [ $isCUDA = "rocm" ]; then
-        # https://rocm.docs.amd.com/projects/radeon-ryzen/en/latest/docs/install/installrad/native_linux/install-onnx.html
-        pip3 install onnxruntime-migraphx -f https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2/
-        # Verify installation
-        python3 -c "import onnxruntime as ort; print(ort.get_available_providers())"
-        # ROCm needs numpy < 2 [workaround](https://rocm.docs.amd.com/projects/radeon-ryzen/en/latest/docs/install/installrad/native_linux/install-onnx.html)
-        pip install "numpy<2" -i $PROXY_POETRY
+    if command -v uv &> /dev/null; then
+        install_ml_with_uv
     else
-        poetry install --no-root --extras cpu
+        echo "uv not found, falling back to poetry..."
+        install_ml_with_poetry
     fi
-
-    # Reset the settings
-    if [ ! -z "${PROXY_POETRY}" ]; then
-        # Remove the source
-        # https://python-poetry.org/docs/cli/#source-remove
-        poetry source remove langsam
-    fi
-
-    )
 
     # Copy results
-    cd $INSTALL_DIR_src
-    cp -a machine-learning/ann machine-learning/immich_ml $INSTALL_DIR_ml/
+    cd "$INSTALL_DIR_src"
+    cp -a machine-learning/ann machine-learning/immich_ml "$INSTALL_DIR_ml/"
+}
+
+
+install_ml_with_uv () {
+    echo "Installing ML dependencies with uv..."
+    cd "$INSTALL_DIR_src/machine-learning"
+
+    export VIRTUAL_ENV="$INSTALL_DIR_ml/venv"
+    mkdir -p "$INSTALL_DIR_ml"
+
+    # Determine Python version
+    local PYTHON_VERSION
+    PYTHON_VERSION="$(python3 --version 2>&1 | awk '{print $2}' | cut -d. -f1,2)"
+
+    if [ "$isCUDA" = true ]; then
+        uv sync --extra cuda --no-dev --active --link-mode copy -n -p "python${PYTHON_VERSION}"
+    elif [ "$isCUDA" = "rocm" ]; then
+        # Install base dependencies first
+        uv sync --extra cpu --no-dev --active --link-mode copy -n -p "python${PYTHON_VERSION}"
+        # Then install ROCm-specific ONNX runtime
+        (
+            . "$VIRTUAL_ENV/bin/activate"
+            pip3 install onnxruntime-migraphx -f https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2/
+            python3 -c "import onnxruntime as ort; print('Available providers:', ort.get_available_providers())"
+            # ROCm needs numpy < 2
+            pip install "numpy<2"
+        )
+    else
+        uv sync --extra cpu --no-dev --active --link-mode copy -n -p "python${PYTHON_VERSION}"
+    fi
+}
+
+
+install_ml_with_poetry () {
+    echo "Installing ML dependencies with poetry..."
+    cd "$INSTALL_DIR_src/machine-learning"
+
+    python3 -m venv "$INSTALL_DIR_ml/venv"
+    (
+        . "$INSTALL_DIR_ml/venv/bin/activate"
+
+        # Use pypi if proxy does not present
+        if [ -z "${PROXY_POETRY}" ]; then
+            PROXY_POETRY=https://pypi.org/simple/
+        fi
+        pip3 install poetry -i "$PROXY_POETRY"
+
+        if [ -n "${PROXY_POETRY}" ]; then
+            poetry source add --priority=primary langsam "$PROXY_POETRY"
+        fi
+
+        # Deal with python 3.12
+        python3_version=$(python3 --version 2>&1 | awk -F' ' '{print $2}' | awk -F'.' '{print $2}')
+        if [ "$python3_version" = 12 ]; then
+            sed -i -e 's/<3.12/<4/g' pyproject.toml
+            poetry update
+        fi
+
+        if [ "$isCUDA" = true ]; then
+            poetry install --no-root --extras cuda
+        elif [ "$isCUDA" = "rocm" ]; then
+            poetry install --no-root --extras cpu
+            pip3 install onnxruntime-migraphx -f https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2/
+            python3 -c "import onnxruntime as ort; print('Available providers:', ort.get_available_providers())"
+            pip install "numpy<2" -i "$PROXY_POETRY"
+        else
+            poetry install --no-root --extras cpu
+        fi
+
+        if [ -n "${PROXY_POETRY}" ]; then
+            poetry source remove langsam
+        fi
+    )
 }
 
 
@@ -438,17 +532,17 @@ install_immich_machine_learning () {
 # Replace /usr/src
 # -------------------
 
-# Honestly, I do not understand what does this part of the script does.
-
 replace_usr_src () {
-    cd $INSTALL_DIR_app
+    cd "$INSTALL_DIR_app"
     grep -Rl /usr/src | xargs -n1 sed -i -e "s@/usr/src@$INSTALL_DIR@g"
-    ln -sf $INSTALL_DIR_app/resources $INSTALL_DIR/
-    mkdir -p $INSTALL_DIR/cache
+    ln -sf "$INSTALL_DIR_app/resources" "$INSTALL_DIR/"
+    mkdir -p "$INSTALL_DIR/cache"
 
-    sed -i -e "s@\"/cache\"@\"$INSTALL_DIR/cache\"@g" $INSTALL_DIR_ml/immich_ml/config.py
+    sed -i -e "s@\"/cache\"@\"$INSTALL_DIR/cache\"@g" "$INSTALL_DIR_ml/immich_ml/config.py"
 
-    grep -RlE "\"/build\"|'/build'" | xargs -n1 sed -i -e "s@\"/build\"@\"$INSTALL_DIR_app\"@g" -e "s@'/build'@'$INSTALL_DIR_app'@g"
+    grep -RlE "\"/build\"|'/build'" | xargs -n1 sed -i \
+        -e "s@\"/build\"@\"$INSTALL_DIR_app\"@g" \
+        -e "s@'/build'@'$INSTALL_DIR_app'@g"
 }
 
 
@@ -457,8 +551,8 @@ replace_usr_src () {
 # -------------------
 
 setup_upload_folder () {
-    ln -s $UPLOAD_DIR $INSTALL_DIR_app/upload
-    ln -s $UPLOAD_DIR $INSTALL_DIR_ml/upload
+    ln -sf "$UPLOAD_DIR" "$INSTALL_DIR_app/upload"
+    ln -sf "$UPLOAD_DIR" "$INSTALL_DIR_ml/upload"
 }
 
 
@@ -467,23 +561,22 @@ setup_upload_folder () {
 # -------------------
 
 download_geonames () {
-    cd $INSTALL_DIR_geo
+    cd "$INSTALL_DIR_geo"
     if [ ! -f "cities500.zip" ] || [ ! -f "admin1CodesASCII.txt" ] || [ ! -f "admin2Codes.txt" ] || [ ! -f "ne_10m_admin_0_countries.geojson" ]; then
-        echo "incomplete geodata, start downloading"
+        echo "Incomplete geodata, start downloading"
         wget -o - https://download.geonames.org/export/dump/admin1CodesASCII.txt &
         wget -o - https://download.geonames.org/export/dump/admin2Codes.txt &
         wget -o - https://download.geonames.org/export/dump/cities500.zip &
         wget -o - https://raw.githubusercontent.com/nvkelso/natural-earth-vector/v5.1.2/geojson/ne_10m_admin_0_countries.geojson &
         wait
-        unzip cities500.zip
+        unzip -o cities500.zip
         date --iso-8601=seconds | tr -d "\n" > geodata-date.txt
     else
-        echo "geodata exists, skip downloading"
+        echo "Geodata exists, skip downloading"
     fi
 
-    cd $INSTALL_DIR
-    # Link the folder
-    ln -s $INSTALL_DIR_geo $INSTALL_DIR_app/
+    cd "$INSTALL_DIR"
+    ln -sf "$INSTALL_DIR_geo" "$INSTALL_DIR_app/"
 }
 
 
@@ -493,11 +586,11 @@ download_geonames () {
 
 create_custom_start_script () {
     # Immich web and microservices
-    cat <<EOF > $INSTALL_DIR_app/start.sh
+    cat <<EOF > "$INSTALL_DIR_app/start.sh"
 #!/bin/bash
 
 export NVM_DIR="$HOME/.nvm"
-[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+[ -s "\$NVM_DIR/nvm.sh" ] && \\. "\$NVM_DIR/nvm.sh"
 
 set -a
 . $INSTALL_DIR/runtime.env
@@ -507,8 +600,10 @@ cd $INSTALL_DIR_app
 exec node $INSTALL_DIR_app/dist/main "\$@"
 EOF
 
+    chmod 775 "$INSTALL_DIR_app/start.sh"
+
     # Machine learning
-    cat <<EOF > $INSTALL_DIR_ml/start.sh
+    cat <<EOF > "$INSTALL_DIR_ml/start.sh"
 #!/bin/bash
 
 set -a
@@ -523,16 +618,16 @@ cd $INSTALL_DIR_ml
 : "\${MACHINE_LEARNING_WORKERS:=1}"
 : "\${MACHINE_LEARNING_WORKER_TIMEOUT:=120}"
 
-exec gunicorn immich_ml.main:app \
-        -k immich_ml.config.CustomUvicornWorker \
-        -w "\$MACHINE_LEARNING_WORKERS" \
-        -b "\$MACHINE_LEARNING_HOST":"\$MACHINE_LEARNING_PORT" \
-        -t "\$MACHINE_LEARNING_WORKER_TIMEOUT" \
-        --log-config-json log_conf.json \
+exec gunicorn immich_ml.main:app \\
+        -k immich_ml.config.CustomUvicornWorker \\
+        -w "\$MACHINE_LEARNING_WORKERS" \\
+        -b "\$MACHINE_LEARNING_HOST":"\$MACHINE_LEARNING_PORT" \\
+        -t "\$MACHINE_LEARNING_WORKER_TIMEOUT" \\
+        --log-config-json log_conf.json \\
         --graceful-timeout 0
 EOF
 
-    chmod 775 $INSTALL_DIR_ml/start.sh
+    chmod 775 "$INSTALL_DIR_ml/start.sh"
 }
 
 
@@ -541,17 +636,35 @@ EOF
 # -------------------
 
 create_runtime_env_file () {
-    cd $INSTALL_DIR
-    # Check if env file exists
+    cd "$INSTALL_DIR"
     if [ ! -f runtime.env ]; then
-        # If not, create a new one based on the template
-        if [ -f $SCRIPT_DIR/runtime.env ]; then
-            cp $SCRIPT_DIR/runtime.env runtime.env
-            echo "New runtime.env file created from the template, exiting"
+        if [ -f "$SCRIPT_DIR/runtime.env" ]; then
+            cp "$SCRIPT_DIR/runtime.env" runtime.env
+            echo "New runtime.env file created from the template"
         else
             echo "runtime.env not found, please clone the entire repo, exiting"
             exit 1
         fi
+    fi
+}
+
+
+# -------------------
+# Create symlinks for CLI tools
+# -------------------
+
+create_cli_symlinks () {
+    # immich CLI
+    if [[ -f "$INSTALL_DIR_app/cli/bin/immich" ]]; then
+        ln -sf "$INSTALL_DIR_app/cli/bin/immich" "$INSTALL_DIR_app/bin/immich"
+        echo "immich CLI symlink created"
+    fi
+
+    # immich-admin
+    if [[ -f "$INSTALL_DIR_app/bin/immich-admin" ]]; then
+        echo "immich-admin is available at: $INSTALL_DIR_app/bin/immich-admin"
+        echo "To make it system-wide, run as root:"
+        echo "  ln -sf $INSTALL_DIR_app/bin/immich-admin /usr/bin/immich-admin"
     fi
 }
 
@@ -592,6 +705,7 @@ review_install_information
 
 install_node
 review_dependency
+enable_maintenance_mode
 clean_previous_build
 create_folders
 safe_git_checkout "$REPO_URL" "$INSTALL_DIR_src" "$REPO_TAG"
@@ -605,12 +719,15 @@ setup_upload_folder
 download_geonames
 create_custom_start_script
 create_runtime_env_file
+create_cli_symlinks
+disable_maintenance_mode
 
-echo "----------------------------------------------------------------"
+echo "================================================================"
 echo "Installation/Upgrade Completed"
-echo "----------------------------------------------------------------"
-echo "If this was first intallation - run post-install.sh."
-echo "./post-install.sh"
-echo "----------------------------------------------------------------"
+echo "================================================================"
+echo "If this was first installation - run post-install.sh as root."
+echo "  ./post-install.sh"
+echo "================================================================"
 echo "If this was an update, restart the services (as root):"
-echo "systemctl restart immich-web immich-ml"
+echo "  systemctl restart immich-web immich-ml"
+echo "================================================================"

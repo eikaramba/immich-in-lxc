@@ -2,7 +2,6 @@
 
 # -------------------
 # Include helper functions
-# Such as git safe_git_checkout, set_user_to_run
 # -------------------
 source "./helpers.sh"
 
@@ -17,9 +16,10 @@ set_common_variables () {
     APP_REPO_URL="https://github.com/immich-app/immich"
     BASE_IMG_REPO_DIR=$SCRIPT_DIR/base-images
     SOURCE_DIR=$SCRIPT_DIR/image-source
-    LD_LIBRARY_PATH=/usr/local/lib # :$LD_LIBRARY_PATH
-    LD_RUN_PATH=/usr/local/lib # :c$LD_RUN_PATH
-    set_user_to_run # Sets $USER_TO_RUN
+    LD_LIBRARY_PATH=/usr/local/lib
+    LD_RUN_PATH=/usr/local/lib
+    REVISION_FILE=/root/.immich_library_revisions
+    set_user_to_run
     set +a
 }
 
@@ -29,7 +29,7 @@ set_common_variables () {
 # -------------------
 
 function remove_build_folder () {
-    cd $1
+    cd "$1"
     if [ -d "build" ]; then
         rm -r build
     fi
@@ -40,10 +40,9 @@ function remove_build_folder () {
 # -------------------
 
 install_runtime_component () {
-    cd $SCRIPT_DIR
+    cd "$SCRIPT_DIR"
 
-    # Redis
-    apt install --no-install-recommends -y\
+    apt install --no-install-recommends -y \
         redis
 }
 
@@ -53,25 +52,24 @@ install_runtime_component () {
 # -------------------
 
 install_build_dependency () {
-    cd $SCRIPT_DIR
-    # Source the os-release file to get access to its variables
+    cd "$SCRIPT_DIR"
+
     if [ -f /etc/os-release ]; then
-        # $ID comes from here
         . /etc/os-release
     else
         echo "Error: /etc/os-release not found."
         exit 1
     fi
 
-    # From immich/base-image
     ## Install common tools
-    apt-get install --no-install-recommends -y\
+    apt-get install --no-install-recommends -y \
         curl git python3-venv python3-dev unzip
 
     ## Install common build components
-    apt-get install --no-install-recommends -y\
+    apt-get install --no-install-recommends -y \
         autoconf \
         build-essential \
+        ccache \
         cmake \
         jq \
         libbrotli-dev \
@@ -91,7 +89,7 @@ install_build_dependency () {
         cpanminus
 
     # Install for imagick & sharp
-    apt-get install --no-install-recommends -y\
+    apt-get install --no-install-recommends -y \
         libtool \
         libaom-dev \
         libx265-dev \
@@ -107,10 +105,13 @@ install_build_dependency () {
         libzip-dev \
         libssl-dev \
         g++ \
-        libimagequant-dev
+        libimagequant-dev \
+        libfontconfig1-dev \
+        libcairo2-dev
 
+    # Enable ccache for faster rebuilds
+    export PATH="/usr/lib/ccache:$PATH"
 
-    # Check the ID and execute the corresponding script
     case "$ID" in
         ubuntu)
             echo "Detected Ubuntu. Running Ubuntu-specific script..."
@@ -123,23 +124,6 @@ install_build_dependency () {
             ./dep-debian.sh
             JPEGLI_LIBJPEG_LIBRARY_SOVERSION="62"
             JPEGLI_LIBJPEG_LIBRARY_VERSION="62.3.0"
-            ;;
-        fedora)
-            echo "Detected Fedora. Not supported, please open issue."
-            exit 1
-            ;;
-        centos)
-            echo "Detected CentOS. Not supported, please open issue."
-            exit 1
-            ;;
-        rhel)
-            echo "Detected RHEL. Not supported, please open issue."
-            exit 1
-            ;;
-        arch)
-            echo "Detected Arch Linux. Not supported, please open issue."
-            neofetch # Top priority
-            exit 1
             ;;
         *)
             echo "Unsupported OS ID: $ID"
@@ -154,57 +138,87 @@ install_build_dependency () {
 # -------------------
 
 install_ffmpeg () {
-    # Don't install ffmpeg over and over again
     if ! command -v ffmpeg &> /dev/null; then
         export SKIP_CONFIRM=true
         curl https://repo.jellyfin.org/install-debuntu.sh | sed '/apt install --yes jellyfin/,$d' | bash
-        unset $SKIP_CONFIRM
-        # Installation
+        unset SKIP_CONFIRM
         apt install -y jellyfin-ffmpeg7
-        # Link to common location
-        ln -s /usr/lib/jellyfin-ffmpeg/ffmpeg  /usr/bin/ffmpeg
-        ln -s /usr/lib/jellyfin-ffmpeg/ffprobe  /usr/bin/ffprobe
+        ln -sf /usr/lib/jellyfin-ffmpeg/ffmpeg  /usr/bin/ffmpeg
+        ln -sf /usr/lib/jellyfin-ffmpeg/ffprobe /usr/bin/ffprobe
     else
         echo "Skipping ffmpeg installation, because it is already installed"
     fi
-
 }
 
 
 # -------------------
-# Install PostgreSQL with VectorCord
+# Install PostgreSQL with VectorChord
 # -------------------
 
 install_postgresql () {
-    # PostgreSQL
-    # [official guide](https://www.postgresql.org/download/linux/ubuntu/)
     apt install -y postgresql-common
     /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
     apt install -y postgresql-17 postgresql-17-pgvector
 
-    # VectorCord
-    # [*VectorChord Installation Documentation*](https://docs.vectorchord.ai/vectorchord/getting-started/installation.html#debian-packages)
-    PG_VC_FILE_NAME=postgresql-17-vchord_0.4.3-1_$(dpkg --print-architecture).deb
-    if [ ! -f "$PG_VC_FILE_NAME" ]; then
-        wget -P /root/ https://github.com/tensorchord/VectorChord/releases/download/0.4.3/$PG_VC_FILE_NAME
+    # VectorChord
+    VCHORD_VERSION="0.4.3"
+    PG_VC_FILE_NAME="postgresql-17-vchord_${VCHORD_VERSION}-1_$(dpkg --print-architecture).deb"
+    if [ ! -f "/root/$PG_VC_FILE_NAME" ]; then
+        wget -P /root/ "https://github.com/tensorchord/VectorChord/releases/download/${VCHORD_VERSION}/${PG_VC_FILE_NAME}"
     fi
-    apt install -y /root/$PG_VC_FILE_NAME
+    apt install -y "/root/$PG_VC_FILE_NAME"
 
-    # Config PostgreSQL to use VectorCord
+    # Track VectorChord version
+    echo "$VCHORD_VERSION" > /root/.vectorchord_version
+
     runuser -u postgres -- psql -c 'ALTER SYSTEM SET shared_preload_libraries = "vchord"'
     systemctl restart postgresql.service
-    # Wait for restart
     sleep 5
     runuser -u postgres -- psql -c 'CREATE EXTENSION IF NOT EXISTS vchord CASCADE'
 }
+
+
+# -------------------
+# Update VectorChord if needed
+# -------------------
+
+update_vectorchord () {
+    local VCHORD_VERSION="0.4.3"
+    local CURRENT_VERSION=""
+
+    if [[ -f /root/.vectorchord_version ]]; then
+        CURRENT_VERSION="$(cat /root/.vectorchord_version)"
+    fi
+
+    if [[ "$CURRENT_VERSION" == "$VCHORD_VERSION" ]]; then
+        echo "VectorChord is already at version $VCHORD_VERSION, skipping update."
+        return 0
+    fi
+
+    echo "Updating VectorChord from ${CURRENT_VERSION:-unknown} to $VCHORD_VERSION..."
+    local PG_VC_FILE_NAME="postgresql-17-vchord_${VCHORD_VERSION}-1_$(dpkg --print-architecture).deb"
+    wget -P /root/ "https://github.com/tensorchord/VectorChord/releases/download/${VCHORD_VERSION}/${PG_VC_FILE_NAME}"
+    apt install -y "/root/$PG_VC_FILE_NAME"
+
+    systemctl restart postgresql.service
+    sleep 5
+
+    runuser -u postgres -- psql -d immich -c "ALTER EXTENSION vector UPDATE;" || true
+    runuser -u postgres -- psql -d immich -c "ALTER EXTENSION vchord UPDATE;" || true
+    runuser -u postgres -- psql -d immich -c "REINDEX INDEX face_index;" || true
+    runuser -u postgres -- psql -d immich -c "REINDEX INDEX clip_index;" || true
+
+    echo "$VCHORD_VERSION" > /root/.vectorchord_version
+    echo "VectorChord updated to $VCHORD_VERSION"
+}
+
 
 # -------------------
 # Change lock file permission
 # -------------------
 
 change_permission () {
-    # Change file permission so that install script could copy the content
-    chmod 666 $BASE_IMG_REPO_DIR/server/sources/*.json
+    chmod 666 "$BASE_IMG_REPO_DIR"/server/sources/*.json
 }
 
 
@@ -213,12 +227,12 @@ change_permission () {
 # -------------------
 
 setup_folders () {
-    cd $SCRIPT_DIR
+    cd "$SCRIPT_DIR"
 
     if [ ! -d "$SOURCE_DIR" ]; then
-        mkdir $SOURCE_DIR
+        mkdir "$SOURCE_DIR"
     fi
-    sudo chown -R $USER_TO_RUN:$USER_TO_RUN $SOURCE_DIR
+    chown -R "$USER_TO_RUN":"$USER_TO_RUN" "$SOURCE_DIR"
 }
 
 
@@ -227,8 +241,53 @@ setup_folders () {
 # -------------------
 
 change_locale () {
-    sed -i 's/# en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen
-    locale-gen
+    if [ -f /etc/locale.gen ]; then
+        sed -i 's/# en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen
+        locale-gen
+    else
+        echo "Creating locale.gen for container environment..."
+        mkdir -p /etc
+        echo "en_US.UTF-8 UTF-8" > /etc/locale.gen
+        locale-gen || echo "locale-gen not available, skipping"
+    fi
+}
+
+
+# -------------------
+# Install mise from official repo
+# -------------------
+
+install_mise () {
+    if ! command -v mise &> /dev/null; then
+        echo "Installing mise from official APT repository..."
+        curl -fsSL https://mise.jdx.dev/gpg-key.pub | tee /etc/apt/keyrings/mise-archive-keyring.pub > /dev/null
+        echo "deb [signed-by=/etc/apt/keyrings/mise-archive-keyring.pub arch=amd64] https://mise.jdx.dev/deb stable main" \
+            > /etc/apt/sources.list.d/mise.list
+        apt-get update
+        apt-get install -y mise
+    else
+        echo "mise is already installed, skipping"
+    fi
+}
+
+
+# -------------------
+# Install uv (fast Python package manager)
+# -------------------
+
+install_uv () {
+    if ! command -v uv &> /dev/null; then
+        echo "Installing uv..."
+        curl -LsSf https://astral.sh/uv/install.sh | sh
+        # Source the env so uv is available in this session
+        export PATH="$HOME/.local/bin:$PATH"
+    else
+        echo "uv is already installed, skipping"
+    fi
+    # Also make uv available to the immich user
+    if id immich &>/dev/null; then
+        su - immich -c 'curl -LsSf https://astral.sh/uv/install.sh | sh' 2>/dev/null || true
+    fi
 }
 
 
@@ -237,63 +296,70 @@ change_locale () {
 # -------------------
 
 build_libjxl () {
-    cd $SCRIPT_DIR
+    cd "$SCRIPT_DIR"
 
-    SOURCE=$SOURCE_DIR/libjxl
+    SOURCE="$SOURCE_DIR/libjxl"
 
     set -e
+    echo "$JPEGLI_LIBJPEG_LIBRARY_SOVERSION"
+    echo "$JPEGLI_LIBJPEG_LIBRARY_VERSION"
 
-    # This is set based on distro, or which libjpeg-dev is available (ABI 62 or 80)
-    echo $JPEGLI_LIBJPEG_LIBRARY_SOVERSION
-    echo $JPEGLI_LIBJPEG_LIBRARY_VERSION
-
-    : "${LIBJXL_REVISION:=$(jq -cr '.revision' $BASE_IMG_REPO_DIR/server/sources/libjxl.json)}"
+    : "${LIBJXL_REVISION:=$(jq -cr '.revision' "$BASE_IMG_REPO_DIR/server/sources/libjxl.json")}"
     set +e
 
-    safe_git_checkout https://github.com/libjxl/libjxl.git $SOURCE $LIBJXL_REVISION
+    # Check if recompile is needed
+    if ! needs_recompile "libjxl" "$LIBJXL_REVISION"; then
+        echo "libjxl is already at revision $LIBJXL_REVISION, skipping build."
+        return 0
+    fi
 
-    cd $SOURCE
+    echo "Building libjxl at revision $LIBJXL_REVISION..."
+
+    # Clean previous source if exists
+    [[ -d "$SOURCE" ]] && rm -rf "$SOURCE"
+
+    safe_git_checkout https://github.com/libjxl/libjxl.git "$SOURCE" "$LIBJXL_REVISION"
+
+    cd "$SOURCE"
 
     git submodule update --init --recursive --depth 1 --recommend-shallow
 
-    git apply $BASE_IMG_REPO_DIR/server/sources/libjxl-patches/jpegli-empty-dht-marker.patch
-    git apply $BASE_IMG_REPO_DIR/server/sources/libjxl-patches/jpegli-icc-warning.patch
+    git apply "$BASE_IMG_REPO_DIR/server/sources/libjxl-patches/jpegli-empty-dht-marker.patch"
+    git apply "$BASE_IMG_REPO_DIR/server/sources/libjxl-patches/jpegli-icc-warning.patch"
 
-    remove_build_folder $SOURCE
-    
+    remove_build_folder "$SOURCE"
+
     mkdir build
     cd build
     cmake \
-    -DCMAKE_BUILD_TYPE=Release \
-    -DBUILD_TESTING=OFF \
-    -DJPEGXL_ENABLE_DOXYGEN=OFF \
-    -DJPEGXL_ENABLE_MANPAGES=OFF \
-    -DJPEGXL_ENABLE_PLUGIN_GIMP210=OFF \
-    -DJPEGXL_ENABLE_BENCHMARK=OFF \
-    -DJPEGXL_ENABLE_EXAMPLES=OFF \
-    -DJPEGXL_FORCE_SYSTEM_BROTLI=ON \
-    -DJPEGXL_FORCE_SYSTEM_HWY=ON \
-    -DJPEGXL_ENABLE_JPEGLI=ON \
-    -DJPEGXL_ENABLE_JPEGLI_LIBJPEG=ON \
-    -DJPEGXL_INSTALL_JPEGLI_LIBJPEG=ON \
-    -DJPEGXL_ENABLE_PLUGINS=ON \
-    -DJPEGLI_LIBJPEG_LIBRARY_SOVERSION="${JPEGLI_LIBJPEG_LIBRARY_SOVERSION}" \
-    -DJPEGLI_LIBJPEG_LIBRARY_VERSION="${JPEGLI_LIBJPEG_LIBRARY_VERSION}" \
-    -DLIBJPEG_TURBO_VERSION_NUMBER=2001005 \
-    ..
-    # Move the following flag to above if one's system support AVX512
-    # -DJPEGXL_ENABLE_AVX512=ON \
-    # -DJPEGXL_ENABLE_AVX512_ZEN4=ON \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DBUILD_TESTING=OFF \
+        -DJPEGXL_ENABLE_DOXYGEN=OFF \
+        -DJPEGXL_ENABLE_MANPAGES=OFF \
+        -DJPEGXL_ENABLE_PLUGIN_GIMP210=OFF \
+        -DJPEGXL_ENABLE_BENCHMARK=OFF \
+        -DJPEGXL_ENABLE_EXAMPLES=OFF \
+        -DJPEGXL_FORCE_SYSTEM_BROTLI=ON \
+        -DJPEGXL_FORCE_SYSTEM_HWY=ON \
+        -DJPEGXL_ENABLE_JPEGLI=ON \
+        -DJPEGXL_ENABLE_JPEGLI_LIBJPEG=ON \
+        -DJPEGXL_INSTALL_JPEGLI_LIBJPEG=ON \
+        -DJPEGXL_ENABLE_PLUGINS=ON \
+        -DJPEGLI_LIBJPEG_LIBRARY_SOVERSION="${JPEGLI_LIBJPEG_LIBRARY_SOVERSION}" \
+        -DJPEGLI_LIBJPEG_LIBRARY_VERSION="${JPEGLI_LIBJPEG_LIBRARY_VERSION}" \
+        -DLIBJPEG_TURBO_VERSION_NUMBER=2001005 \
+        ..
     echo "Building libjxl using $(nproc) threads"
     cmake --build . -- -j"$(nproc)"
     cmake --install .
 
     ldconfig /usr/local/lib
 
-    # Clean up builds
     make clean
-    remove_build_folder $SOURCE
-    rm -rf $SOURCE/third_party/
+    remove_build_folder "$SOURCE"
+    rm -rf "$SOURCE/third_party/"
+
+    set_tracked_revision "libjxl" "$LIBJXL_REVISION"
 }
 
 
@@ -302,19 +368,27 @@ build_libjxl () {
 # -------------------
 
 build_libheif () {
-    cd $SCRIPT_DIR
+    cd "$SCRIPT_DIR"
 
-    SOURCE=$SOURCE_DIR/libheif
+    SOURCE="$SOURCE_DIR/libheif"
 
     set -e
-    : "${LIBHEIF_REVISION:=$(jq -cr '.revision' $BASE_IMG_REPO_DIR/server/sources/libheif.json)}"
+    : "${LIBHEIF_REVISION:=$(jq -cr '.revision' "$BASE_IMG_REPO_DIR/server/sources/libheif.json")}"
     set +e
 
-    safe_git_checkout https://github.com/strukturag/libheif.git $SOURCE $LIBHEIF_REVISION
+    if ! needs_recompile "libheif" "$LIBHEIF_REVISION"; then
+        echo "libheif is already at revision $LIBHEIF_REVISION, skipping build."
+        return 0
+    fi
 
-    cd $SOURCE
+    echo "Building libheif at revision $LIBHEIF_REVISION..."
+    [[ -d "$SOURCE" ]] && rm -rf "$SOURCE"
 
-    remove_build_folder $SOURCE
+    safe_git_checkout https://github.com/strukturag/libheif.git "$SOURCE" "$LIBHEIF_REVISION"
+
+    cd "$SOURCE"
+
+    remove_build_folder "$SOURCE"
 
     mkdir build
     cd build
@@ -331,9 +405,10 @@ build_libheif () {
     make install -j "$(nproc)"
     ldconfig /usr/local/lib
 
-    # Clean up builds
     make clean
-    remove_build_folder $SOURCE
+    remove_build_folder "$SOURCE"
+
+    set_tracked_revision "libheif" "$LIBHEIF_REVISION"
 }
 
 
@@ -350,12 +425,19 @@ build_libraw() {
     : "${LIBRAW_REVISION:=$(jq -cr '.revision' "$BASE_IMG_REPO_DIR/server/sources/libraw.json")}"
     set +e
 
+    if ! needs_recompile "libraw" "$LIBRAW_REVISION"; then
+        echo "libraw is already at revision $LIBRAW_REVISION, skipping build."
+        return 0
+    fi
+
+    echo "Building libraw at revision $LIBRAW_REVISION..."
+    [[ -d "$SOURCE" ]] && rm -rf "$SOURCE"
+
     safe_git_checkout "https://github.com/libraw/libraw.git" "$SOURCE" "$LIBRAW_REVISION"
 
     cd "$SOURCE"
     autoreconf --install
 
-    # Create an out-of-source build directory
     mkdir -p build
     cd build
 
@@ -365,12 +447,12 @@ build_libraw() {
     make install
     ldconfig /usr/local/lib
 
-    # Clean up builds
     make clean
     cd ..
-    remove_build_folder $SOURCE
-}
+    remove_build_folder "$SOURCE"
 
+    set_tracked_revision "libraw" "$LIBRAW_REVISION"
+}
 
 
 # -------------------
@@ -378,29 +460,37 @@ build_libraw() {
 # -------------------
 
 build_image_magick () {
-    cd $SCRIPT_DIR
+    cd "$SCRIPT_DIR"
 
-    SOURCE=$SOURCE_DIR/image-magick
+    SOURCE="$SOURCE_DIR/image-magick"
 
     set -e
-    : "${IMAGEMAGICK_REVISION:=$(jq -cr '.revision' $BASE_IMG_REPO_DIR/server/sources/imagemagick.json)}"
+    : "${IMAGEMAGICK_REVISION:=$(jq -cr '.revision' "$BASE_IMG_REPO_DIR/server/sources/imagemagick.json")}"
     set +e
 
-    safe_git_checkout https://github.com/ImageMagick/ImageMagick.git $SOURCE $IMAGEMAGICK_REVISION
+    if ! needs_recompile "imagemagick" "$IMAGEMAGICK_REVISION"; then
+        echo "ImageMagick is already at revision $IMAGEMAGICK_REVISION, skipping build."
+        return 0
+    fi
 
-    cd $SOURCE
+    echo "Building ImageMagick at revision $IMAGEMAGICK_REVISION..."
+    [[ -d "$SOURCE" ]] && rm -rf "$SOURCE"
+
+    safe_git_checkout https://github.com/ImageMagick/ImageMagick.git "$SOURCE" "$IMAGEMAGICK_REVISION"
+
+    cd "$SOURCE"
 
     ./configure --with-raw --with-modules
     echo "Building ImageMagick using $(nproc) threads"
     make -j"$(nproc)"
     make install
     ldconfig /usr/local/lib
-    
-    # Check
-    ldd $(which magick) | grep libraw
 
-    # Clean up builds
+    ldd "$(which magick)" | grep libraw
+
     make clean
+
+    set_tracked_revision "imagemagick" "$IMAGEMAGICK_REVISION"
 }
 
 
@@ -409,66 +499,56 @@ build_image_magick () {
 # -------------------
 
 build_libvips () {
+    cd "$SCRIPT_DIR"
 
-    cd $SCRIPT_DIR
-
-    SOURCE=$SOURCE_DIR/libvips
+    SOURCE="$SOURCE_DIR/libvips"
 
     set -e
-    : "${LIBVIPS_REVISION:=$(jq -cr '.revision' $BASE_IMG_REPO_DIR/server/sources/libvips.json)}"
+    : "${LIBVIPS_REVISION:=$(jq -cr '.revision' "$BASE_IMG_REPO_DIR/server/sources/libvips.json")}"
     set +e
 
-    safe_git_checkout https://github.com/libvips/libvips.git $SOURCE $LIBVIPS_REVISION
+    if ! needs_recompile "libvips" "$LIBVIPS_REVISION"; then
+        echo "libvips is already at revision $LIBVIPS_REVISION, skipping build."
+        return 0
+    fi
 
-    cd $SOURCE
-    
-    remove_build_folder $SOURCE
-    
-    # -Djpeg-xl=disabled is added because previous broken install will break libvips
+    echo "Building libvips at revision $LIBVIPS_REVISION..."
+    [[ -d "$SOURCE" ]] && rm -rf "$SOURCE"
+
+    safe_git_checkout https://github.com/libvips/libvips.git "$SOURCE" "$LIBVIPS_REVISION"
+
+    cd "$SOURCE"
+
+    remove_build_folder "$SOURCE"
+
     meson setup build --buildtype=release --libdir=lib -Dintrospection=disabled -Dtiff=disabled
     cd build
     ninja install
     ldconfig /usr/local/lib
 
-    # Clean up builds
-    remove_build_folder $SOURCE
+    remove_build_folder "$SOURCE"
+
+    set_tracked_revision "libvips" "$LIBVIPS_REVISION"
 }
 
 # -------------------
-# Remove build dependency
+# Remove build dependency (conservative — keep what sharp needs)
 # -------------------
 
 remove_build_dependency () {
-    # NOTE: Do NOT remove packages that sharp/node-gyp needs to compile against libvips.
-    # The following are safe to remove after the image libraries are built:
+    # Only remove packages that are NOT needed by sharp/node-gyp at build time.
+    # sharp requires pkg-config to find vips and all its dependencies' .pc files.
+    # We keep: libexpat1-dev, libexif-dev, libspng-dev, libglib2.0-dev, librsvg2-dev,
+    #          liblcms2-dev, libgsf-1-dev, libpango1.0-dev, libcairo2-dev, libfontconfig1-dev,
+    #          and other -dev packages that vips.pc references.
     apt-get remove -y \
         libheif-dev \
-        libvips-dev
-    # Intentionally keeping: libexif-dev, libexpat1-dev, libspng-dev, librsvg2-dev,
-    # libglib2.0-dev, liblcms2-dev, libgsf-1-dev, libbrotli-dev, libde265-dev, etc.
-    # These are required by pkg-config when sharp builds against system libvips.
+        libvips-dev \
+        2>/dev/null || true
 
-# Manually finding what is safe to remove
-# and woun't be needed by install.sh which builds sharp from source
-
-    #   apt-get remove -y \
-    #     libdav1d-dev \
-    #     libhwy-dev \
-    #     libwebp-dev \
-    #     libio-compress-brotli-perl
-    # apt-get remove -y \
-    #     libtool \
-    #     liblcms2-dev \
-    #     libgif-dev \
-    #     libpango1.0-dev \
-    #     libjpeg-dev \
-    #     libpng-dev \
-    #     libtiff-dev \
-    #     libxml2-dev \
-    #     libfftw3-dev \
-    #     libopenexr-dev \
-    #     libzip-dev \
-    #     libde265-dev 
+    # NOTE: If you want to reclaim more space after install.sh has completed,
+    # you can manually remove additional -dev packages. But do NOT remove them
+    # before running install.sh, or sharp will fail to build.
 }
 
 
@@ -477,7 +557,7 @@ remove_build_dependency () {
 # -------------------
 
 add_runtime_dependency () {
-     apt-get install --no-install-recommends -yqq \
+    apt-get install --no-install-recommends -yqq \
         libde265-0 \
         libexif12 \
         libexpat1 \
@@ -509,14 +589,17 @@ add_runtime_dependency () {
         libhwy1t64
 }
 
-set -xeuo pipefail # Make people's life easier
+set -xeuo pipefail
 
 set_common_variables
+init_revision_tracking
 safe_git_checkout "$REPO_URL" "$BASE_IMG_REPO_DIR" main
 install_runtime_component
 install_build_dependency
 install_ffmpeg
 install_postgresql
+install_mise
+install_uv
 change_permission
 setup_folders
 change_locale
@@ -527,3 +610,9 @@ build_image_magick
 build_libvips
 remove_build_dependency
 add_runtime_dependency
+
+echo "================================================================"
+echo "Pre-install completed successfully!"
+echo "Library revisions tracked in: $REVISION_FILE"
+cat "$REVISION_FILE"
+echo "================================================================"

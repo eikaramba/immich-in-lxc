@@ -60,10 +60,8 @@ safe_git_checkout() {
         git fetch --all --tags
 
         if git rev-parse --verify "$ref^{commit}" >/dev/null 2>&1; then
-            # ref is a commit SHA or tag
             git checkout --detach "$ref"
         else
-            # ref is a branch
             git checkout -B "$ref" "origin/$ref"
             git reset --hard "origin/$ref"
         fi
@@ -88,4 +86,39 @@ safe_git_checkout() {
 
     echo "Switching to $USER_TO_RUN for git operations..."
     su "$USER_TO_RUN" -s /bin/bash -c "run_git_ops"
+}
+
+# --- Library revision tracking ---
+REVISION_FILE="${REVISION_FILE:-$HOME/.immich_library_revisions}"
+
+init_revision_tracking() {
+    if [[ ! -f "$REVISION_FILE" ]]; then
+        touch "$REVISION_FILE"
+    fi
+}
+
+get_tracked_revision() {
+    local library="$1"
+    grep "^${library}: " "$REVISION_FILE" 2>/dev/null | awk '{print $2}' || echo ""
+}
+
+set_tracked_revision() {
+    local library="$1"
+    local revision="$2"
+    if grep -q "^${library}: " "$REVISION_FILE" 2>/dev/null; then
+        sed -i "s/^${library}: .*$/${library}: ${revision}/" "$REVISION_FILE"
+    else
+        echo "${library}: ${revision}" >> "$REVISION_FILE"
+    fi
+}
+
+needs_recompile() {
+    local library="$1"
+    local new_revision="$2"
+    local current
+    current="$(get_tracked_revision "$library")"
+    if [[ "$current" == "$new_revision" ]]; then
+        return 1 # No recompile needed
+    fi
+    return 0 # Recompile needed
 }
