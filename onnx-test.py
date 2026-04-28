@@ -24,7 +24,7 @@ MODEL_URL = "https://huggingface.co/onnxmodelzoo/mobilenetv2-12/resolve/main/mob
 LABELS_URL = "https://raw.githubusercontent.com/anishathalye/imagenet-simple-labels/master/imagenet-simple-labels.json"
 MODEL_PATH = "/tmp/mobilenetv2-12.onnx"
 LABELS_PATH = "/tmp/imagenet-labels.json"
-TEST_IMAGE_URL = "https://upload.wikimedia.org/wikipedia/commons/thumb/4/4d/Cat_November_2010-1a.jpg/1200px-Cat_November_2010-1a.jpg"
+TEST_IMAGE_URL = "https://github.com/EliSchwartz/imagenet-sample-images/raw/master/n02123045_tabby.JPEG"
 TEST_IMAGE_PATH = "/tmp/test_cat.jpg"
 
 
@@ -34,9 +34,15 @@ def download_file(url: str, dest: str, description: str) -> None:
         print(f"  [cached] {description}: {dest}")
         return
     print(f"  Downloading {description}...")
-    urllib.request.urlretrieve(url, dest)
+    req = urllib.request.Request(
+        url,
+        headers={"User-Agent": "Mozilla/5.0 (compatible; test-script/1.0)"}
+    )
+    with urllib.request.urlopen(req) as response, open(dest, "wb") as f:
+        f.write(response.read())
     size_mb = os.path.getsize(dest) / (1024 * 1024)
     print(f"  Saved to {dest} ({size_mb:.1f} MB)")
+
 
 
 def preprocess_image(image_path: str) -> np.ndarray:
