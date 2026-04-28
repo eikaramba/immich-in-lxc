@@ -488,46 +488,74 @@ install_ml_with_uv () {
 
         # Replace CPU onnxruntime with MIGraphX version inside the venv
         (
+            # Activate venv and unset PYTHONPATH to avoid leaks
+            unset PYTHONPATH
             . "$VIRTUAL_ENV/bin/activate"
+
+            # Make sure we're using the venv's python, not user-local
+            hash -r
 
             # Ensure pip is available inside the uv-created venv
             python3 -m ensurepip --upgrade 2>/dev/null || uv pip install pip
 
-            # Step 1: Uninstall CPU-only onnxruntime (conflicts with migraphx)
-            python3 -m pip uninstall -y onnxruntime 2>/dev/null || true
+            # Step 1: Remove any user-local installs that could shadow the venv
+            rm -rf "$HOME/.local/lib/python${PYTHON_VERSION}/site-packages/onnxruntime"
+            rm -rf "$HOME/.local/lib/python${PYTHON_VERSION}/site-packages"/onnxruntime-*.dist-info
+            rm -rf "$HOME/.local/lib/python${PYTHON_VERSION}/site-packages"/onnxruntime_migraphx*
 
-            # Step 2: Clean up any leftover onnxruntime namespace directories
+            # Step 2: Uninstall both possible variants from the venv
+            python3 -m pip uninstall -y onnxruntime 2>/dev/null || true
+            python3 -m pip uninstall -y onnxruntime-migraphx 2>/dev/null || true
+
+            # Step 3: Aggressively clean up leftover namespace dirs and metadata in the venv
             local site_pkgs
             site_pkgs="$(python3 -c 'import site; print(site.getsitepackages()[0])')"
-            if [[ -d "$site_pkgs/onnxruntime" ]]; then
-                rm -rf "$site_pkgs/onnxruntime"
-                rm -rf "$site_pkgs"/onnxruntime-*.dist-info
-            fi
+            rm -rf "$site_pkgs/onnxruntime"
+            rm -rf "$site_pkgs"/onnxruntime-*.dist-info
+            rm -rf "$site_pkgs"/onnxruntime_migraphx*
+            rm -rf "$site_pkgs"/onnxruntime_migraphx-*.dist-info
 
-            # Step 3: Install onnxruntime-migraphx from AMD repo
-            python3 -m pip install --no-cache-dir onnxruntime-migraphx \
+            # Step 4: Install onnxruntime-migraphx from AMD repo (force-reinstall to bypass any cached metadata)
+            python3 -m pip install --no-cache-dir --force-reinstall --no-deps \
+                onnxruntime-migraphx \
                 -f https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2/
 
-            # Step 4: Pin numpy < 2 (ROCm requirement, migraphx pulls numpy 2.x)
-            python3 -m pip install "numpy<2"
+            # Re-install dependencies that --no-deps skipped
+            python3 -m pip install --no-cache-dir \
+                flatbuffers protobuf sympy coloredlogs
 
-            # Step 5: Verify MIGraphX provider is available
+            # Step 5: Pin numpy < 2 (ROCm requirement; migraphx wheel pulls numpy 2.x)
+            python3 -m pip install --force-reinstall "numpy<2"
+
+            # Step 6: Verify install location AND provider availability
             echo "Verifying ROCm ML setup..."
-            python3 -c "
+            python3 <<PYEOF
+import sys
 import onnxruntime as ort
+
+ort_path = ort.__file__
+expected_prefix = "$VIRTUAL_ENV"
+if not ort_path.startswith(expected_prefix):
+    print(f"FAIL: onnxruntime loaded from wrong location: {ort_path}")
+    print(f"      Expected prefix: {expected_prefix}")
+    sys.exit(1)
+
 providers = ort.get_available_providers()
-print('Available providers:', providers)
+print(f'onnxruntime location: {ort_path}')
+print(f'Available providers:  {providers}')
+
 if 'MIGraphXExecutionProvider' not in providers:
-    print('WARNING: MIGraphXExecutionProvider not found!')
-    exit(1)
-else:
-    print('SUCCESS: MIGraphX provider is available')
-"
+    print('FAIL: MIGraphXExecutionProvider not found!')
+    sys.exit(1)
+
+print('SUCCESS: MIGraphX provider is available in the venv')
+PYEOF
         )
     else
         uv sync --extra cpu --no-dev --active --link-mode copy -n -p "python${PYTHON_VERSION}"
     fi
 }
+
 
 
 
@@ -538,7 +566,9 @@ install_ml_with_poetry () {
 
     python3 -m venv "$INSTALL_DIR_ml/venv"
     (
+        unset PYTHONPATH
         . "$INSTALL_DIR_ml/venv/bin/activate"
+        hash -r
 
         if [ -z "${PROXY_POETRY}" ]; then
             PROXY_POETRY=https://pypi.org/simple/
@@ -558,42 +588,58 @@ install_ml_with_poetry () {
         if [ "$isCUDA" = true ]; then
             poetry install --no-root --extras cuda
         elif [ "$isCUDA" = "rocm" ]; then
-            # Source ROCm environment
             if [[ -f /etc/profile.d/rocm.sh ]]; then
                 # shellcheck disable=SC1091
                 source /etc/profile.d/rocm.sh
             fi
 
-            # Install base CPU dependencies
             poetry install --no-root --extras cpu
 
-            # Remove CPU onnxruntime and clean up leftovers
+            local PY_VER
+            PY_VER="$(python3 --version 2>&1 | awk '{print $2}' | cut -d. -f1,2)"
+
+            # Clean user-local shadows
+            rm -rf "$HOME/.local/lib/python${PY_VER}/site-packages/onnxruntime"
+            rm -rf "$HOME/.local/lib/python${PY_VER}/site-packages"/onnxruntime-*.dist-info
+            rm -rf "$HOME/.local/lib/python${PY_VER}/site-packages"/onnxruntime_migraphx*
+
+            # Uninstall both variants
             python3 -m pip uninstall -y onnxruntime 2>/dev/null || true
+            python3 -m pip uninstall -y onnxruntime-migraphx 2>/dev/null || true
+
+            # Clean venv site-packages
             local site_pkgs
             site_pkgs="$(python3 -c 'import site; print(site.getsitepackages()[0])')"
-            if [[ -d "$site_pkgs/onnxruntime" ]]; then
-                rm -rf "$site_pkgs/onnxruntime"
-                rm -rf "$site_pkgs"/onnxruntime-*.dist-info
-            fi
+            rm -rf "$site_pkgs/onnxruntime"
+            rm -rf "$site_pkgs"/onnxruntime-*.dist-info
+            rm -rf "$site_pkgs"/onnxruntime_migraphx*
+            rm -rf "$site_pkgs"/onnxruntime_migraphx-*.dist-info
 
-            # Install MIGraphX version
-            python3 -m pip install --no-cache-dir onnxruntime-migraphx \
+            # Force-install MIGraphX
+            python3 -m pip install --no-cache-dir --force-reinstall --no-deps \
+                onnxruntime-migraphx \
                 -f https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2/
 
-            # Pin numpy < 2
-            python3 -m pip install "numpy<2"
+            python3 -m pip install --no-cache-dir flatbuffers protobuf sympy coloredlogs
+            python3 -m pip install --force-reinstall "numpy<2"
 
             # Verify
-            python3 -c "
+            python3 <<PYEOF
+import sys
 import onnxruntime as ort
+ort_path = ort.__file__
+expected_prefix = "$INSTALL_DIR_ml/venv"
+if not ort_path.startswith(expected_prefix):
+    print(f"FAIL: onnxruntime loaded from wrong location: {ort_path}")
+    sys.exit(1)
 providers = ort.get_available_providers()
-print('Available providers:', providers)
+print(f'onnxruntime location: {ort_path}')
+print(f'Available providers:  {providers}')
 if 'MIGraphXExecutionProvider' not in providers:
-    print('WARNING: MIGraphXExecutionProvider not found!')
-    exit(1)
-else:
-    print('SUCCESS: MIGraphX provider is available')
-"
+    print('FAIL: MIGraphXExecutionProvider not found!')
+    sys.exit(1)
+print('SUCCESS: MIGraphX provider is available in the venv')
+PYEOF
         else
             poetry install --no-root --extras cpu
         fi
@@ -603,6 +649,7 @@ else:
         fi
     )
 }
+
 
 
 
