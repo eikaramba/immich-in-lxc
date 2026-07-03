@@ -323,14 +323,14 @@ install_immich_web_server_pnpm () {
 
     # --- Phase 1: Build (ignore global libvips so pnpm install doesn't try to link sharp prematurely) ---
     export SHARP_IGNORE_GLOBAL_LIBVIPS=true
-    pnpm --filter immich build
+    pnpm --filter immich... build
     unset SHARP_IGNORE_GLOBAL_LIBVIPS
 
     # --- Phase 2: Deploy with system libvips ---
     export SHARP_FORCE_GLOBAL_LIBVIPS=true
 
     # Build SDK + web
-    pnpm --filter @immich/sdk --filter immich-web build
+    pnpm --filter @immich/sdk... --filter immich-web build
 
     # Deploy the server component using system libvips
     pnpm --filter immich --prod --frozen-lockfile --no-optional deploy "$INSTALL_DIR_app"
