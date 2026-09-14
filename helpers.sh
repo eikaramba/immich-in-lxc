@@ -54,16 +54,23 @@ safe_git_checkout() {
             git clone "$repo_url" "$target_dir"
         fi
 
-        echo "🔁 Forcing repo at $target_dir to origin/$ref"
+        echo "🔁 Forcing repo at $target_dir to $ref"
         cd "$target_dir"
 
-        git fetch --all --tags
+        git fetch --all --tags --prune
 
-        if git rev-parse --verify "$ref^{commit}" >/dev/null 2>&1; then
-            git checkout --detach "$ref"
-        else
+        if git rev-parse --verify "origin/$ref" >/dev/null 2>&1; then
             git checkout -B "$ref" "origin/$ref"
             git reset --hard "origin/$ref"
+        elif git rev-parse --verify "refs/tags/$ref" >/dev/null 2>&1; then
+            git checkout --detach "refs/tags/$ref"
+            git reset --hard "refs/tags/$ref"
+        elif git rev-parse --verify "$ref^{commit}" >/dev/null 2>&1; then
+            git checkout --detach "$ref"
+            git reset --hard "$ref"
+        else
+            echo "❌ Could not resolve ref: $ref"
+            exit 1
         fi
 
         git clean -fdx

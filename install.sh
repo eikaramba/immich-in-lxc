@@ -346,8 +346,8 @@ install_immich_web_server_pnpm () {
     pnpm --filter immich --prod --frozen-lockfile --no-optional deploy "$INSTALL_DIR_app"
 
     # Rebuild sharp in the deployed directory against system libvips
-    pnpm --config.verify-deps-before-run=false --dir "$INSTALL_DIR_app/node_modules/sharp" exec npm run build 2>/dev/null || \
-        (cd "$INSTALL_DIR_app" && pnpm rebuild sharp)
+    echo "Building Sharp against system libvips..."
+    pnpm --config.verify-deps-before-run=false --dir "$INSTALL_DIR_app/node_modules/sharp" exec npm run build
 
     unset SHARP_FORCE_GLOBAL_LIBVIPS
 
