@@ -84,6 +84,7 @@ set_common_variables () {
     INSTALL_DIR_geo=$INSTALL_DIR/geodata
     TMP_DIR=/tmp/$(whoami)/immich-in-lxc/
     REPO_URL="https://github.com/immich-app/immich"
+    NODE_OPTIONS="--max-old-space-size=4096"
     set +a
 }
 
@@ -125,7 +126,7 @@ install_node () {
     [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
 
     # Get required pnpm version from source package.json if available
-    local PNPM_VERSION="10"
+    local PNPM_VERSION="11"
     if [[ -f "$INSTALL_DIR_src/package.json" ]]; then
         local PKG_PNPM
         PKG_PNPM="$(jq -r '.packageManager // empty' "$INSTALL_DIR_src/package.json" | grep -oP '[\d.]+')" || true
@@ -137,7 +138,17 @@ install_node () {
     if ! command -v pnpm &> /dev/null; then
         echo "Installing pnpm@${PNPM_VERSION}"
         npm install -g "pnpm@${PNPM_VERSION}"
+    else
+        local CURRENT_PNPM
+        CURRENT_PNPM="$(pnpm -v | cut -d. -f1)"
+        if [[ "$CURRENT_PNPM" -lt 10 ]]; then
+            echo "Upgrading pnpm to pnpm@${PNPM_VERSION}..."
+            npm install -g "pnpm@${PNPM_VERSION}"
+        fi
     fi
+
+    # Allow pnpm build scripts without interactive prompts
+    pnpm config set --global dangerouslyAllowAllBuilds true 2>/dev/null || true
 
     echo "------------------Current versions------------------"
     echo "npm version: $(npm -v)"
@@ -206,7 +217,7 @@ enable_maintenance_mode () {
             . "$INSTALL_DIR/runtime.env"
             set +a
             cd "$INSTALL_DIR_app/bin"
-            node ./immich-admin enable-maintenance-mode 2>/dev/null || true
+            ./immich-admin enable-maintenance-mode 2>/dev/null || true
         )
         export MAINT_MODE=1
     else
@@ -228,7 +239,7 @@ disable_maintenance_mode () {
             . "$INSTALL_DIR/runtime.env"
             set +a
             cd "$INSTALL_DIR_app/bin"
-            node ./immich-admin disable-maintenance-mode 2>/dev/null || true
+            ./immich-admin disable-maintenance-mode 2>/dev/null || true
         )
         unset MAINT_MODE
     fi
@@ -311,46 +322,81 @@ install_immich_web_server_pnpm () {
     export CI=1
     corepack enable 2>/dev/null || true
 
-    # ============================================================
-    # FIX: Increase Node.js heap size for Vite/Svelte web build
-    # Default is ~1.7 GB which is insufficient for the web build.
-    # Adjust the value based on your available RAM.
-    # ============================================================
+    # Ensure pnpm allows builds without prompts
+    pnpm config set --global dangerouslyAllowAllBuilds true 2>/dev/null || true
+
+    # Increase Node.js heap size for Vite/Svelte web build
     export NODE_OPTIONS="--max-old-space-size=8192"
 
     # Install dependencies
     pnpm install --frozen-lockfile
 
-    # --- Phase 1: Build (ignore global libvips so pnpm install doesn't try to link sharp prematurely) ---
+    # --- Phase 1: Build base SDKs & server ---
+    pnpm --filter @immich/sdk build
+    pnpm --filter @immich/plugin-sdk build
+
     export SHARP_IGNORE_GLOBAL_LIBVIPS=true
-    pnpm --filter immich... build
+    pnpm --filter immich build
     unset SHARP_IGNORE_GLOBAL_LIBVIPS
 
-    # --- Phase 2: Deploy with system libvips ---
+    # --- Phase 2: Deploy server with system libvips ---
     export SHARP_FORCE_GLOBAL_LIBVIPS=true
 
-    # Build SDK + web
-    pnpm --filter @immich/sdk... --filter immich-web build
-
-    # Deploy the server component using system libvips
+    # Deploy server component
     pnpm --filter immich --prod --frozen-lockfile --no-optional deploy "$INSTALL_DIR_app"
 
     # Rebuild sharp in the deployed directory against system libvips
-    (cd "$INSTALL_DIR_app"; pnpm rebuild sharp)
+    pnpm --config.verify-deps-before-run=false --dir "$INSTALL_DIR_app/node_modules/sharp" exec npm run build 2>/dev/null || \
+        (cd "$INSTALL_DIR_app" && pnpm rebuild sharp)
 
     unset SHARP_FORCE_GLOBAL_LIBVIPS
 
-    # Build and deploy the CLI
-    pnpm --filter @immich/cli --frozen-lockfile --prod --no-optional deploy "$INSTALL_DIR_app/cli"
-
-    ln -sf ../cli/bin/immich "$INSTALL_DIR_app/bin/immich"
-
-    # Copy the built Web UI to the target directory
+    # --- Phase 3: Build Web UI & CLI ---
+    pnpm --filter immich-web build
     cp -a web/build "$INSTALL_DIR_app/www"
 
+    pnpm --filter @immich/cli build
+    pnpm --filter @immich/cli --frozen-lockfile --prod --no-optional deploy "$INSTALL_DIR_app/cli"
+    mkdir -p "$INSTALL_DIR_app/bin"
+    ln -sf ../cli/bin/immich "$INSTALL_DIR_app/bin/immich"
+
+    # --- Phase 4: Build plugins (Immich v3 uses packages/plugin-core) ---
+    export PATH="$HOME/.local/bin:$PATH"
+    if ! command -v extism-js &> /dev/null || ! command -v wasm-merge &> /dev/null; then
+        echo "extism-js or wasm-merge not found in PATH — installing..."
+        curl -fsSL https://raw.githubusercontent.com/extism/js-pdk/main/install.sh | bash || true
+        export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"
+    fi
+
+    if [ -d "packages/plugin-core" ]; then
+        echo "Building core plugin (@immich/plugin-core)..."
+        pnpm --filter @immich/plugin-core build
+        mkdir -p "$INSTALL_DIR_app/plugins/immich-plugin-core"
+        cp -a packages/plugin-core/dist "$INSTALL_DIR_app/plugins/immich-plugin-core/"
+        cp -a packages/plugin-core/manifest.json "$INSTALL_DIR_app/plugins/immich-plugin-core/"
+        ln -sfn "$INSTALL_DIR_app/plugins/immich-plugin-core" "$INSTALL_DIR_app/corePlugin"
+        echo "Core plugin build completed."
+    elif [ -d "plugins" ]; then
+        # Legacy fallback for older Immich versions
+        (
+            cd plugins
+            pnpm install
+            pnpm run build 2>/dev/null || true
+        )
+        mkdir -p "$INSTALL_DIR_app/corePlugin"
+        if [ -d "./plugins/dist" ]; then
+            cp -a ./plugins/dist "$INSTALL_DIR_app/corePlugin/"
+            cp -a ./plugins/manifest.json "$INSTALL_DIR_app/corePlugin/manifest.json"
+        fi
+    else
+        echo "Plugin directory not found — skipping plugin build."
+    fi
+
+    # Copy files
     cp -a LICENSE "$INSTALL_DIR_app/"
     cp -a i18n "$INSTALL_DIR/"
-    cp -a server/bin/get-cpus.sh server/bin/start.sh "$INSTALL_DIR_app/"
+    cp -a server/bin/get-cpus.sh server/bin/start.sh "$INSTALL_DIR_app/" 2>/dev/null || true
+    cp -a server/bin/immich-admin "$INSTALL_DIR_app/bin/" 2>/dev/null || true
 
     # Copy package.json to bin for immich-admin
     cp "$INSTALL_DIR_app/package.json" "$INSTALL_DIR_app/bin/" 2>/dev/null || true
@@ -358,36 +404,26 @@ install_immich_web_server_pnpm () {
     # Fix immich-admin path
     if [[ -f "$INSTALL_DIR_app/bin/immich-admin" ]]; then
         sed -i "s|^start|${INSTALL_DIR_app}/bin/start|" "$INSTALL_DIR_app/bin/immich-admin" 2>/dev/null || true
+        chmod +x "$INSTALL_DIR_app/bin/immich-admin"
     fi
 
-    # Build plugins (v2.3.0+)
-    if [ -d "plugins" ]; then
-        (
-            cd plugins
-            pnpm install
-
-            # Use mise if available (installed from APT in pre-install)
-            if command -v mise &> /dev/null; then
-                mise trust --all --yes 2>/dev/null || true
-                mise trust ./mise.toml 2>/dev/null || true
-                mise install 2>/dev/null || true
-                mise run build 2>/dev/null || pnpm run build 2>/dev/null || true
-            else
-                # Fallback: try npm-installed mise
-                if command -v npx &> /dev/null; then
-                    npx @jdxcode/mise trust --all --yes 2>/dev/null || true
-                    npx @jdxcode/mise build 2>/dev/null || true
-                fi
-            fi
-        )
-
-        mkdir -p "$INSTALL_DIR_app/corePlugin"
-        if [ -d "./plugins/dist" ]; then
-            cp -a ./plugins/dist "$INSTALL_DIR_app/corePlugin/"
-            cp -a ./plugins/manifest.json "$INSTALL_DIR_app/corePlugin/manifest.json"
-        fi
-    else
-        echo "plugins directory not found — skipping plugin build."
+    # Hotfix for Sharp pixel limit during large image/HEIC metadata extraction
+    local MEDIA_REPO_JS="$INSTALL_DIR_app/dist/repositories/media.repository.js"
+    if [[ -f "$MEDIA_REPO_JS" ]]; then
+        python3 - "$MEDIA_REPO_JS" <<'PY'
+import sys
+from pathlib import Path
+p = Path(sys.argv[1])
+if p.exists():
+    s = p.read_text()
+    old = "(0, sharp_1.default)(input).metadata()"
+    new = "(0, sharp_1.default)(input, { unlimited: true, limitInputPixels: false }).metadata()"
+    if new in s:
+        print("Sharp pixel limit patch already present.")
+    elif old in s:
+        p.write_text(s.replace(old, new, 1))
+        print("Sharp pixel limit patch applied.")
+PY
     fi
 
     # Unset mirror for pnpm (if it was set)
@@ -409,10 +445,10 @@ generate_build_lock () {
 
     REPO_URL_BASE_IMG="https://github.com/immich-app/base-images"
 
-    tag=$(grep -oP '(?<=immich-app/base-server-dev:)[0-9]+' "$INSTALL_DIR_app/Dockerfile" 2>/dev/null || echo "")
+    tag=$(grep -oP '(?<=immich-app/base-server-dev:)[0-9]+' "$INSTALL_DIR_src/server/Dockerfile" 2>/dev/null || echo "")
 
     if [[ -z "$tag" ]]; then
-        echo "WARNING: Could not extract base-server-dev tag from Dockerfile. Trying 'main'..."
+        echo "WARNING: Could not extract base-server-dev tag from server/Dockerfile. Trying 'main'..."
         tag="main"
     fi
 
@@ -518,6 +554,7 @@ install_ml_with_uv () {
             # Step 4: Install onnxruntime-migraphx from AMD repo (force-reinstall to bypass any cached metadata)
             python3 -m pip install --no-cache-dir --force-reinstall --no-deps \
                 onnxruntime-migraphx \
+                -f https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2.4/ \
                 -f https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2/
 
             # Re-install dependencies that --no-deps skipped
@@ -688,10 +725,11 @@ setup_upload_folder () {
 
 download_geonames () {
     cd "$INSTALL_DIR_geo"
-    if [ ! -f "cities500.zip" ] || [ ! -f "admin1CodesASCII.txt" ] || [ ! -f "admin2Codes.txt" ] || [ ! -f "ne_10m_admin_0_countries.geojson" ]; then
+    if [ ! -f "cities500.zip" ] || [ ! -f "admin1CodesASCII.txt" ] || [ ! -f "admin2Codes.txt" ] || [ ! -f "countryInfo.txt" ] || [ ! -f "ne_10m_admin_0_countries.geojson" ]; then
         echo "Incomplete geodata, start downloading"
         wget -o - https://download.geonames.org/export/dump/admin1CodesASCII.txt &
         wget -o - https://download.geonames.org/export/dump/admin2Codes.txt &
+        wget -o - https://download.geonames.org/export/dump/countryInfo.txt &
         wget -o - https://download.geonames.org/export/dump/cities500.zip &
         wget -o - https://raw.githubusercontent.com/nvkelso/natural-earth-vector/v5.1.2/geojson/ne_10m_admin_0_countries.geojson &
         wait
@@ -718,6 +756,8 @@ create_custom_start_script () {
 export NVM_DIR="$HOME/.nvm"
 [ -s "\$NVM_DIR/nvm.sh" ] && \\. "\$NVM_DIR/nvm.sh"
 
+export PATH=/usr/lib/jellyfin-ffmpeg:\$HOME/.local/bin:\$PATH
+
 set -a
 . $INSTALL_DIR/runtime.env
 set +a
@@ -728,29 +768,30 @@ EOF
 
     chmod 775 "$INSTALL_DIR_app/start.sh"
 
-    # Machine learning
+    # Also make start.sh available inside bin/ for immich-admin
+    mkdir -p "$INSTALL_DIR_app/bin"
+    cp -a "$INSTALL_DIR_app/start.sh" "$INSTALL_DIR_app/bin/start.sh"
+
+    # Machine learning (standard upstream entrypoint via python -m immich_ml)
     cat <<EOF > "$INSTALL_DIR_ml/start.sh"
 #!/bin/bash
+
+export PATH=/usr/lib/jellyfin-ffmpeg:\$HOME/.local/bin:\$PATH
 
 set -a
 . $INSTALL_DIR/runtime.env
 set +a
 
+# Source ROCm environment if available
+if [[ -f /etc/profile.d/rocm.sh ]]; then
+    # shellcheck disable=SC1091
+    source /etc/profile.d/rocm.sh
+fi
+
 cd $INSTALL_DIR_ml
 . venv/bin/activate
 
-: "\${MACHINE_LEARNING_HOST:=127.0.0.1}"
-: "\${MACHINE_LEARNING_PORT:=3003}"
-: "\${MACHINE_LEARNING_WORKERS:=1}"
-: "\${MACHINE_LEARNING_WORKER_TIMEOUT:=120}"
-
-exec gunicorn immich_ml.main:app \\
-        -k immich_ml.config.CustomUvicornWorker \\
-        -w "\$MACHINE_LEARNING_WORKERS" \\
-        -b "\$MACHINE_LEARNING_HOST":"\$MACHINE_LEARNING_PORT" \\
-        -t "\$MACHINE_LEARNING_WORKER_TIMEOUT" \\
-        --log-config-json log_conf.json \\
-        --graceful-timeout 0
+exec python3 -m immich_ml
 EOF
 
     chmod 775 "$INSTALL_DIR_ml/start.sh"

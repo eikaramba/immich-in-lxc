@@ -223,18 +223,12 @@ Note: To change back to the pre-su user, `exit` should do the trick.
 
 
 <details>
-<summary>Database Migration for Existing Users (v1.133.0+)</summary>
+<summary>Database & VectorChord Notes (v3.x / VectorChord 1.1.1)</summary>
 
-**Note:** Starting with Immich v1.133.0, the project has migrated from pgvecto.rs to [VectorChord](https://github.com/tensorchord/VectorChord) for better performance and stability.
+**Note:** Immich uses [VectorChord](https://github.com/tensorchord/VectorChord) for fast and scalable vector searches (Smart Search and Facial Recognition).
+In Immich v3+, VectorChord is the standard default and `DB_VECTOR_EXTENSION` is no longer needed in your `runtime.env`.
 
-If you're upgrading from a version prior to v1.133.0 and have an existing Immich installation, you may need to perform a database migration. The migration from pgvecto.rs to VectorChord is automatic, but you should:
-
-1. **Backup your database** before upgrading
-2. Ensure you're upgrading from at least v1.107.2 or later
-
-**Note:** If you have an existing `$INSTALL_DIR/runtime.env` (e.g. /home/immich/runtime.env) file with `DB_VECTOR_EXTENSION=pgvector`, you should update it to `DB_VECTOR_EXTENSION=vectorchord` for the new VectorChord extension.
-
-For more details on the VectorChord migration, see the [official Immich v1.133.0 release notes](https://github.com/immich-app/immich/releases/tag/v1.133.0).
+When running `pre-install.sh`, VectorChord will automatically be upgraded to **v1.1.1** with pre-upgrade VACUUM ANALYZE to prevent toast chunk index corruption issues.
 
 </details>
 

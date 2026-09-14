@@ -161,7 +161,7 @@ install_postgresql () {
     apt install -y postgresql-17 postgresql-17-pgvector
 
     # VectorChord
-    VCHORD_VERSION="0.4.3"
+    VCHORD_VERSION="1.1.1"
     PG_VC_FILE_NAME="postgresql-17-vchord_${VCHORD_VERSION}-1_$(dpkg --print-architecture).deb"
     if [ ! -f "/root/$PG_VC_FILE_NAME" ]; then
         wget -P /root/ "https://github.com/tensorchord/VectorChord/releases/download/${VCHORD_VERSION}/${PG_VC_FILE_NAME}"
@@ -173,7 +173,7 @@ install_postgresql () {
 
     runuser -u postgres -- psql -c 'ALTER SYSTEM SET shared_preload_libraries = "vchord"'
     systemctl restart postgresql.service
-    sleep 5
+    sleep 3
     runuser -u postgres -- psql -c 'CREATE EXTENSION IF NOT EXISTS vchord CASCADE'
 }
 
@@ -183,7 +183,7 @@ install_postgresql () {
 # -------------------
 
 update_vectorchord () {
-    local VCHORD_VERSION="0.4.3"
+    local VCHORD_VERSION="1.1.1"
     local CURRENT_VERSION=""
 
     if [[ -f /root/.vectorchord_version ]]; then
@@ -195,13 +195,24 @@ update_vectorchord () {
         return 0
     fi
 
-    echo "Updating VectorChord from ${CURRENT_VERSION:-unknown} to $VCHORD_VERSION..."
-    local PG_VC_FILE_NAME="postgresql-17-vchord_${VCHORD_VERSION}-1_$(dpkg --print-architecture).deb"
-    wget -P /root/ "https://github.com/tensorchord/VectorChord/releases/download/${VCHORD_VERSION}/${PG_VC_FILE_NAME}"
+    local PG_VERSION
+    PG_VERSION=$(ls /etc/postgresql/ 2>/dev/null | sort -V | tail -1)
+    PG_VERSION=${PG_VERSION:-17}
+
+    echo "Updating VectorChord from ${CURRENT_VERSION:-unknown} to $VCHORD_VERSION (PG $PG_VERSION)..."
+
+    # Vacuum dead tuples before upgrade (prevents #15588 "missing chunk ... for toast value" during reindex)
+    runuser -u postgres -- psql -d immich -c "VACUUM (ANALYZE) smart_search;" 2>/dev/null || true
+    runuser -u postgres -- psql -d immich -c "VACUUM (ANALYZE) face_search;" 2>/dev/null || true
+
+    local PG_VC_FILE_NAME="postgresql-${PG_VERSION}-vchord_${VCHORD_VERSION}-1_$(dpkg --print-architecture).deb"
+    if [ ! -f "/root/$PG_VC_FILE_NAME" ]; then
+        wget -P /root/ "https://github.com/tensorchord/VectorChord/releases/download/${VCHORD_VERSION}/${PG_VC_FILE_NAME}"
+    fi
     apt install -y "/root/$PG_VC_FILE_NAME"
 
     systemctl restart postgresql.service
-    sleep 5
+    sleep 3
 
     runuser -u postgres -- psql -d immich -c "ALTER EXTENSION vector UPDATE;" || true
     runuser -u postgres -- psql -d immich -c "ALTER EXTENSION vchord UPDATE;" || true
@@ -292,6 +303,103 @@ install_uv () {
 
 
 # -------------------
+# Install extism-js and binaryen (needed for Immich plugins)
+# -------------------
+
+install_extism_tools () {
+    if ! command -v extism-js &> /dev/null || ! command -v wasm-merge &> /dev/null; then
+        echo "Installing extism-js and binaryen for Immich core plugins..."
+        curl -fsSL https://raw.githubusercontent.com/extism/js-pdk/main/install.sh | bash
+    else
+        echo "extism-js and binaryen are already installed, skipping"
+    fi
+}
+
+
+# -------------------
+# Build jpegli
+# -------------------
+
+build_jpegli () {
+    cd "$SCRIPT_DIR"
+
+    SOURCE="$SOURCE_DIR/jpegli"
+
+    JPEGLI_LIBJPEG_LIBRARY_SOVERSION="${JPEGLI_LIBJPEG_LIBRARY_SOVERSION:-62}"
+    JPEGLI_LIBJPEG_LIBRARY_VERSION="${JPEGLI_LIBJPEG_LIBRARY_VERSION:-62.3.0}"
+
+    if [ ! -f "$BASE_IMG_REPO_DIR/server/sources/jpegli.json" ]; then
+        echo "jpegli.json not found in base-images, skipping separate jpegli build."
+        return 0
+    fi
+
+    set -e
+    : "${JPEGLI_REVISION:=$(jq -cr '.revision' "$BASE_IMG_REPO_DIR/server/sources/jpegli.json")}"
+    set +e
+
+    if ! needs_recompile "jpegli" "$JPEGLI_REVISION"; then
+        echo "jpegli is already at revision $JPEGLI_REVISION, skipping build."
+        return 0
+    fi
+
+    echo "Building jpegli at revision $JPEGLI_REVISION..."
+    [[ -d "$SOURCE" ]] && rm -rf "$SOURCE"
+
+    safe_git_checkout https://github.com/google/jpegli.git "$SOURCE" "$JPEGLI_REVISION"
+
+    cd "$SOURCE"
+    git submodule update --init --depth 1 --recommend-shallow third_party/libjpeg-turbo
+
+    if [ -f "$BASE_IMG_REPO_DIR/server/sources/jpegli-patches/jpegli-empty-dht-marker.patch" ]; then
+        git apply -3 "$BASE_IMG_REPO_DIR/server/sources/jpegli-patches/jpegli-empty-dht-marker.patch" || true
+    fi
+    if [ -f "$BASE_IMG_REPO_DIR/server/sources/jpegli-patches/jpegli-icc-warning.patch" ]; then
+        git apply -3 "$BASE_IMG_REPO_DIR/server/sources/jpegli-patches/jpegli-icc-warning.patch" || true
+    fi
+
+    mkdir -p build
+    cd build
+    cmake \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DBUILD_TESTING=OFF \
+        -DJPEGLI_ENABLE_DOXYGEN=OFF \
+        -DJPEGLI_ENABLE_MANPAGES=OFF \
+        -DJPEGLI_ENABLE_BENCHMARK=OFF \
+        -DJPEGLI_ENABLE_TOOLS=OFF \
+        -DJPEGLI_ENABLE_DEVTOOLS=OFF \
+        -DJPEGLI_ENABLE_FUZZERS=OFF \
+        -DJPEGLI_ENABLE_JNI=OFF \
+        -DJPEGLI_ENABLE_OPENEXR=OFF \
+        -DJPEGLI_ENABLE_SJPEG=OFF \
+        -DJPEGLI_ENABLE_SKCMS=OFF \
+        -DJPEGLI_FORCE_SYSTEM_HWY=ON \
+        -DJPEGLI_FORCE_SYSTEM_LCMS2=ON \
+        -DJPEGLI_ENABLE_JPEGLI_LIBJPEG=ON \
+        -DJPEGLI_INSTALL_JPEGLI_LIBJPEG=ON \
+        -DJPEGLI_ENABLE_HWY_AVX3=ON \
+        -DJPEGLI_ENABLE_HWY_AVX3_ZEN4=ON \
+        -DJPEGLI_ENABLE_HWY_SVE=OFF \
+        -DJPEGLI_ENABLE_HWY_SVE2=OFF \
+        -DJPEGLI_ENABLE_HWY_SVE2_128=ON \
+        -DJPEGLI_LIBJPEG_LIBRARY_SOVERSION="${JPEGLI_LIBJPEG_LIBRARY_SOVERSION}" \
+        -DJPEGLI_LIBJPEG_LIBRARY_VERSION="${JPEGLI_LIBJPEG_LIBRARY_VERSION}" \
+        -DLIBJPEG_TURBO_VERSION_NUMBER=2001005 \
+        ..
+
+    echo "Building jpegli using $(nproc) threads"
+    cmake --build . -- -j"$(nproc)"
+    cmake --install .
+
+    ldconfig /usr/local/lib
+
+    make clean
+    remove_build_folder "$SOURCE"
+
+    set_tracked_revision "jpegli" "$JPEGLI_REVISION"
+}
+
+
+# -------------------
 # Build libjxl
 # -------------------
 
@@ -301,9 +409,6 @@ build_libjxl () {
     SOURCE="$SOURCE_DIR/libjxl"
 
     set -e
-    echo "$JPEGLI_LIBJPEG_LIBRARY_SOVERSION"
-    echo "$JPEGLI_LIBJPEG_LIBRARY_VERSION"
-
     : "${LIBJXL_REVISION:=$(jq -cr '.revision' "$BASE_IMG_REPO_DIR/server/sources/libjxl.json")}"
     set +e
 
@@ -324,8 +429,13 @@ build_libjxl () {
 
     git submodule update --init --recursive --depth 1 --recommend-shallow
 
-    git apply "$BASE_IMG_REPO_DIR/server/sources/libjxl-patches/jpegli-empty-dht-marker.patch"
-    git apply "$BASE_IMG_REPO_DIR/server/sources/libjxl-patches/jpegli-icc-warning.patch"
+    # Apply patches if legacy libjxl-patches exist
+    if [ -f "$BASE_IMG_REPO_DIR/server/sources/libjxl-patches/jpegli-empty-dht-marker.patch" ]; then
+        git apply "$BASE_IMG_REPO_DIR/server/sources/libjxl-patches/jpegli-empty-dht-marker.patch" || true
+    fi
+    if [ -f "$BASE_IMG_REPO_DIR/server/sources/libjxl-patches/jpegli-icc-warning.patch" ]; then
+        git apply "$BASE_IMG_REPO_DIR/server/sources/libjxl-patches/jpegli-icc-warning.patch" || true
+    fi
 
     remove_build_folder "$SOURCE"
 
@@ -341,13 +451,12 @@ build_libjxl () {
         -DJPEGXL_ENABLE_EXAMPLES=OFF \
         -DJPEGXL_FORCE_SYSTEM_BROTLI=ON \
         -DJPEGXL_FORCE_SYSTEM_HWY=ON \
-        -DJPEGXL_ENABLE_JPEGLI=ON \
-        -DJPEGXL_ENABLE_JPEGLI_LIBJPEG=ON \
-        -DJPEGXL_INSTALL_JPEGLI_LIBJPEG=ON \
+        -DJPEGXL_ENABLE_HWY_AVX3=ON \
+        -DJPEGXL_ENABLE_HWY_AVX3_ZEN4=ON \
+        -DJPEGXL_ENABLE_HWY_SVE=OFF \
+        -DJPEGXL_ENABLE_HWY_SVE2=OFF \
+        -DJPEGXL_ENABLE_HWY_SVE2_128=ON \
         -DJPEGXL_ENABLE_PLUGINS=ON \
-        -DJPEGLI_LIBJPEG_LIBRARY_SOVERSION="${JPEGLI_LIBJPEG_LIBRARY_SOVERSION}" \
-        -DJPEGLI_LIBJPEG_LIBRARY_VERSION="${JPEGLI_LIBJPEG_LIBRARY_VERSION}" \
-        -DLIBJPEG_TURBO_VERSION_NUMBER=2001005 \
         ..
     echo "Building libjxl using $(nproc) threads"
     cmake --build . -- -j"$(nproc)"
@@ -399,7 +508,7 @@ build_libheif () {
         -DWITH_LIBDE265=ON \
         -DWITH_AOM_DECODER=OFF \
         -DWITH_AOM_ENCODER=ON \
-        -DWITH_X265=ON \
+        -DWITH_X265=OFF \
         -DWITH_EXAMPLES=OFF \
         ..
     make install -j "$(nproc)"
@@ -480,7 +589,7 @@ build_image_magick () {
 
     cd "$SOURCE"
 
-    ./configure --with-raw --with-modules
+    ./configure --with-modules CPPFLAGS="-DMAGICK_LIBRAW_VERSION_TAIL=202502"
     echo "Building ImageMagick using $(nproc) threads"
     make -j"$(nproc)"
     make install
@@ -518,6 +627,10 @@ build_libvips () {
     safe_git_checkout https://github.com/libvips/libvips.git "$SOURCE" "$LIBVIPS_REVISION"
 
     cd "$SOURCE"
+
+    if [ -f "$BASE_IMG_REPO_DIR/server/sources/libvips-patches/0001-put-other-loaders-ahead-of-dcrawload.patch" ]; then
+        git apply "$BASE_IMG_REPO_DIR/server/sources/libvips-patches/0001-put-other-loaders-ahead-of-dcrawload.patch" || true
+    fi
 
     remove_build_folder "$SOURCE"
 
@@ -598,11 +711,14 @@ install_runtime_component
 install_build_dependency
 install_ffmpeg
 install_postgresql
+update_vectorchord
 install_mise
 install_uv
+install_extism_tools
 change_permission
 setup_folders
 change_locale
+build_jpegli
 build_libjxl
 build_libheif
 build_libraw

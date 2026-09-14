@@ -17,5 +17,7 @@ SyslogIdentifier=immich-machine-learning
 StandardOutput=append:/var/log/immich/ml.log
 StandardError=append:/var/log/immich/ml.log
 
+SupplementaryGroups=video render
+
 [Install]
 WantedBy=multi-user.target
