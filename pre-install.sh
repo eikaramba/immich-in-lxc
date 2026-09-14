@@ -156,25 +156,30 @@ install_ffmpeg () {
 # -------------------
 
 install_postgresql () {
-    apt install -y postgresql-common
-    /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
-    apt install -y postgresql-17 postgresql-17-pgvector
+    if ! command -v psql &> /dev/null; then
+        apt install -y postgresql-common
+        /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+        apt install -y postgresql-17 postgresql-17-pgvector
 
-    # VectorChord
-    VCHORD_VERSION="1.1.1"
-    PG_VC_FILE_NAME="postgresql-17-vchord_${VCHORD_VERSION}-1_$(dpkg --print-architecture).deb"
-    if [ ! -f "/root/$PG_VC_FILE_NAME" ]; then
-        wget -P /root/ "https://github.com/tensorchord/VectorChord/releases/download/${VCHORD_VERSION}/${PG_VC_FILE_NAME}"
+        # VectorChord
+        VCHORD_VERSION="1.1.1"
+        PG_VC_FILE_NAME="postgresql-17-vchord_${VCHORD_VERSION}-1_$(dpkg --print-architecture).deb"
+        if [ ! -f "/root/$PG_VC_FILE_NAME" ]; then
+            wget -P /root/ "https://github.com/tensorchord/VectorChord/releases/download/${VCHORD_VERSION}/${PG_VC_FILE_NAME}"
+        fi
+        apt install -y "/root/$PG_VC_FILE_NAME"
+
+        # Track VectorChord version
+        echo "$VCHORD_VERSION" > /root/.vectorchord_version
+
+        runuser -u postgres -- psql -c 'ALTER SYSTEM SET shared_preload_libraries = "vchord"'
+        systemctl restart postgresql.service
+        sleep 3
+        runuser -u postgres -- psql -c 'CREATE EXTENSION IF NOT EXISTS vchord CASCADE'
+    else
+        echo "PostgreSQL is already installed. Verifying/updating VectorChord..."
+        update_vectorchord
     fi
-    apt install -y "/root/$PG_VC_FILE_NAME"
-
-    # Track VectorChord version
-    echo "$VCHORD_VERSION" > /root/.vectorchord_version
-
-    runuser -u postgres -- psql -c 'ALTER SYSTEM SET shared_preload_libraries = "vchord"'
-    systemctl restart postgresql.service
-    sleep 3
-    runuser -u postgres -- psql -c 'CREATE EXTENSION IF NOT EXISTS vchord CASCADE'
 }
 
 
@@ -190,37 +195,38 @@ update_vectorchord () {
         CURRENT_VERSION="$(cat /root/.vectorchord_version)"
     fi
 
-    if [[ "$CURRENT_VERSION" == "$VCHORD_VERSION" ]]; then
-        echo "VectorChord is already at version $VCHORD_VERSION, skipping update."
-        return 0
-    fi
-
     local PG_VERSION
     PG_VERSION=$(ls /etc/postgresql/ 2>/dev/null | sort -V | tail -1)
     PG_VERSION=${PG_VERSION:-17}
 
-    echo "Updating VectorChord from ${CURRENT_VERSION:-unknown} to $VCHORD_VERSION (PG $PG_VERSION)..."
+    if [[ "$CURRENT_VERSION" != "$VCHORD_VERSION" ]]; then
+        echo "Updating VectorChord from ${CURRENT_VERSION:-unknown} to $VCHORD_VERSION (PG $PG_VERSION)..."
 
-    # Vacuum dead tuples before upgrade (prevents #15588 "missing chunk ... for toast value" during reindex)
-    runuser -u postgres -- psql -d immich -c "VACUUM (ANALYZE) smart_search;" 2>/dev/null || true
-    runuser -u postgres -- psql -d immich -c "VACUUM (ANALYZE) face_search;" 2>/dev/null || true
+        # Vacuum dead tuples before upgrade (prevents #15588 "missing chunk ... for toast value" during reindex)
+        runuser -u postgres -- psql -d immich -c "VACUUM (ANALYZE) smart_search;" 2>/dev/null || true
+        runuser -u postgres -- psql -d immich -c "VACUUM (ANALYZE) face_search;" 2>/dev/null || true
 
-    local PG_VC_FILE_NAME="postgresql-${PG_VERSION}-vchord_${VCHORD_VERSION}-1_$(dpkg --print-architecture).deb"
-    if [ ! -f "/root/$PG_VC_FILE_NAME" ]; then
-        wget -P /root/ "https://github.com/tensorchord/VectorChord/releases/download/${VCHORD_VERSION}/${PG_VC_FILE_NAME}"
+        local PG_VC_FILE_NAME="postgresql-${PG_VERSION}-vchord_${VCHORD_VERSION}-1_$(dpkg --print-architecture).deb"
+        if [ ! -f "/root/$PG_VC_FILE_NAME" ]; then
+            wget -P /root/ "https://github.com/tensorchord/VectorChord/releases/download/${VCHORD_VERSION}/${PG_VC_FILE_NAME}"
+        fi
+        apt install -y "/root/$PG_VC_FILE_NAME"
+
+        systemctl restart postgresql.service
+        sleep 3
     fi
-    apt install -y "/root/$PG_VC_FILE_NAME"
 
-    systemctl restart postgresql.service
-    sleep 3
-
-    runuser -u postgres -- psql -d immich -c "ALTER EXTENSION vector UPDATE;" || true
-    runuser -u postgres -- psql -d immich -c "ALTER EXTENSION vchord UPDATE;" || true
-    runuser -u postgres -- psql -d immich -c "REINDEX INDEX face_index;" || true
-    runuser -u postgres -- psql -d immich -c "REINDEX INDEX clip_index;" || true
+    # Always ensure the extension in the immich database is updated to the installed package version
+    if runuser -u postgres -- psql -lqt 2>/dev/null | cut -d \| -f 1 | grep -qw immich; then
+        echo "Ensuring VectorChord extension is updated in immich database..."
+        runuser -u postgres -- psql -d immich -c "ALTER EXTENSION vector UPDATE;" 2>/dev/null || true
+        runuser -u postgres -- psql -d immich -c "ALTER EXTENSION vchord UPDATE;" 2>/dev/null || true
+        runuser -u postgres -- psql -d immich -c "REINDEX INDEX face_index;" 2>/dev/null || true
+        runuser -u postgres -- psql -d immich -c "REINDEX INDEX clip_index;" 2>/dev/null || true
+    fi
 
     echo "$VCHORD_VERSION" > /root/.vectorchord_version
-    echo "VectorChord updated to $VCHORD_VERSION"
+    echo "VectorChord is at $VCHORD_VERSION"
 }
 
 
@@ -312,6 +318,14 @@ install_extism_tools () {
         curl -fsSL https://raw.githubusercontent.com/extism/js-pdk/main/install.sh | bash
     else
         echo "extism-js and binaryen are already installed, skipping"
+    fi
+
+    # Ensure extism-js is in /usr/local/bin so non-root users (like 'immich') can execute it
+    if [ -f /root/.local/bin/extism-js ] && [ ! -f /usr/local/bin/extism-js ]; then
+        cp -a /root/.local/bin/extism-js /usr/local/bin/extism-js
+        chmod 755 /usr/local/bin/extism-js
+    elif [ -f /usr/local/bin/extism-js ]; then
+        chmod 755 /usr/local/bin/extism-js
     fi
 }
 
@@ -711,7 +725,6 @@ install_runtime_component
 install_build_dependency
 install_ffmpeg
 install_postgresql
-update_vectorchord
 install_mise
 install_uv
 install_extism_tools
