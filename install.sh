@@ -763,7 +763,9 @@ set -a
 set +a
 
 cd $INSTALL_DIR_app
-exec node $INSTALL_DIR_app/dist/main "\$@"
+entry=$INSTALL_DIR_app/dist/main.js
+[ -f "\$entry" ] || entry=$INSTALL_DIR_app/dist/main
+exec node "\$entry" "\$@"
 EOF
 
     chmod 775 "$INSTALL_DIR_app/start.sh"
