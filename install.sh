@@ -561,8 +561,8 @@ install_ml_with_uv () {
             python3 -m pip install --no-cache-dir \
                 flatbuffers protobuf sympy coloredlogs
 
-            # Step 5: Pin numpy < 2 (ROCm requirement; migraphx wheel pulls numpy 2.x)
-            python3 -m pip install --force-reinstall "numpy<2"
+            # Step 5: Match upstream NumPy requirements (current MIGraphX supports NumPy 2).
+            python3 -m pip install --force-reinstall "$(python3 -c 'import sys, tomllib; deps=tomllib.load(open(sys.argv[1], "rb"))["project"]["dependencies"]; print(next(d for d in deps if d.startswith("numpy")))' "$INSTALL_DIR_src/machine-learning/pyproject.toml")"
 
             # Step 6: Verify install location AND provider availability
             echo "Verifying ROCm ML setup..."
@@ -658,7 +658,7 @@ install_ml_with_poetry () {
                 -f https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2/
 
             python3 -m pip install --no-cache-dir flatbuffers protobuf sympy coloredlogs
-            python3 -m pip install --force-reinstall "numpy<2"
+            python3 -m pip install --force-reinstall "$(python3 -c 'import sys, tomllib; deps=tomllib.load(open(sys.argv[1], "rb"))["project"]["dependencies"]; print(next(d for d in deps if d.startswith("numpy")))' "$INSTALL_DIR_src/machine-learning/pyproject.toml")"
 
             # Verify
             python3 <<PYEOF
