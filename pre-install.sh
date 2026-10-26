@@ -137,12 +137,26 @@ install_build_dependency () {
 # Install ffmpeg automatically
 # -------------------
 
+retry() {
+    local attempts=$1 delay=$2 n=1
+    shift 2
+    until "$@"; do
+        if (( n >= attempts )); then
+            echo "Command failed after $attempts attempts: $*" >&2
+            return 1
+        fi
+        echo "Attempt $n/$attempts failed, retrying in ${delay}s: $*" >&2
+        n=$((n + 1))
+        sleep "$delay"
+    done
+}
+
 install_ffmpeg () {
     if ! command -v ffmpeg &> /dev/null; then
         export SKIP_CONFIRM=true
-        curl https://repo.jellyfin.org/install-debuntu.sh | sed '/apt install --yes jellyfin/,$d' | bash
+        retry 4 5 bash -c 'set -o pipefail; curl -fsSL --retry 3 https://repo.jellyfin.org/install-debuntu.sh | sed "/apt install --yes jellyfin/,\$d" | bash'
         unset SKIP_CONFIRM
-        apt install -y jellyfin-ffmpeg7
+        retry 4 10 apt-get install -y jellyfin-ffmpeg7
         ln -sf /usr/lib/jellyfin-ffmpeg/ffmpeg  /usr/bin/ffmpeg
         ln -sf /usr/lib/jellyfin-ffmpeg/ffprobe /usr/bin/ffprobe
     else
@@ -271,17 +285,29 @@ change_locale () {
 
 
 # -------------------
-# Install mise from official repo
+# Install mise from GitHub release
+# (the apt repo keeps one version and its cached index often points at a
+#  deleted deb; see community-scripts/ProxmoxVE#18099)
 # -------------------
 
 install_mise () {
+    # Drop the legacy apt repo so it cannot break "apt update" later
+    rm -f /etc/apt/sources.list.d/mise.list /etc/apt/keyrings/mise-archive-keyring.pub
+
     if ! command -v mise &> /dev/null; then
-        echo "Installing mise from official APT repository..."
-        curl -fsSL https://mise.jdx.dev/gpg-key.pub | tee /etc/apt/keyrings/mise-archive-keyring.pub > /dev/null
-        echo "deb [signed-by=/etc/apt/keyrings/mise-archive-keyring.pub arch=amd64] https://mise.jdx.dev/deb stable main" \
-            > /etc/apt/sources.list.d/mise.list
-        apt-get update
-        apt-get install -y mise
+        echo "Installing mise from GitHub release..."
+        local arch tag
+        case "$(uname -m)" in
+            x86_64)  arch="x64" ;;
+            aarch64) arch="arm64" ;;
+            *) echo "Unsupported architecture for mise: $(uname -m)" >&2; return 1 ;;
+        esac
+        tag=$(retry 3 5 curl -fsSLI -o /dev/null -w '%{url_effective}' https://github.com/jdx/mise/releases/latest)
+        tag=${tag##*/}
+        retry 3 5 curl -fsSL -o /usr/local/bin/mise \
+            "https://github.com/jdx/mise/releases/download/${tag}/mise-${tag}-linux-${arch}"
+        chmod +x /usr/local/bin/mise
+        mise --version
     else
         echo "mise is already installed, skipping"
     fi
