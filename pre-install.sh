@@ -373,9 +373,7 @@ build_jpegli () {
         return 0
     fi
 
-    set -e
     : "${JPEGLI_REVISION:=$(jq -cr '.revision' "$BASE_IMG_REPO_DIR/server/sources/jpegli.json")}"
-    set +e
 
     if ! needs_recompile "jpegli" "$JPEGLI_REVISION"; then
         echo "jpegli is already at revision $JPEGLI_REVISION, skipping build."
@@ -448,12 +446,10 @@ build_libjxl () {
 
     SOURCE="$SOURCE_DIR/libjxl"
 
-    set -e
     : "${LIBJXL_REVISION:=$(jq -cr '.revision' "$BASE_IMG_REPO_DIR/server/sources/libjxl.json")}"
-    set +e
 
     # Check if recompile is needed
-    if ! needs_recompile "libjxl" "$LIBJXL_REVISION"; then
+    if ! needs_recompile "libjxl" "$LIBJXL_REVISION" && pkg-config --exists libjxl libjxl_threads; then
         echo "libjxl is already at revision $LIBJXL_REVISION, skipping build."
         return 0
     fi
@@ -504,6 +500,11 @@ build_libjxl () {
 
     ldconfig /usr/local/lib
 
+    if ! pkg-config --exists libjxl libjxl_threads; then
+        echo "ERROR: libjxl was built but pkg-config cannot find libjxl/libjxl_threads." >&2
+        exit 1
+    fi
+
     make clean
     remove_build_folder "$SOURCE"
     rm -rf "$SOURCE/third_party/"
@@ -521,9 +522,7 @@ build_libheif () {
 
     SOURCE="$SOURCE_DIR/libheif"
 
-    set -e
     : "${LIBHEIF_REVISION:=$(jq -cr '.revision' "$BASE_IMG_REPO_DIR/server/sources/libheif.json")}"
-    set +e
 
     if ! needs_recompile "libheif" "$LIBHEIF_REVISION"; then
         echo "libheif is already at revision $LIBHEIF_REVISION, skipping build."
@@ -570,9 +569,7 @@ build_libraw() {
 
     SOURCE="$SOURCE_DIR/libraw"
 
-    set -e
     : "${LIBRAW_REVISION:=$(jq -cr '.revision' "$BASE_IMG_REPO_DIR/server/sources/libraw.json")}"
-    set +e
 
     if ! needs_recompile "libraw" "$LIBRAW_REVISION"; then
         echo "libraw is already at revision $LIBRAW_REVISION, skipping build."
@@ -613,9 +610,7 @@ build_image_magick () {
 
     SOURCE="$SOURCE_DIR/image-magick"
 
-    set -e
     : "${IMAGEMAGICK_REVISION:=$(jq -cr '.revision' "$BASE_IMG_REPO_DIR/server/sources/imagemagick.json")}"
-    set +e
 
     if ! needs_recompile "imagemagick" "$IMAGEMAGICK_REVISION"; then
         echo "ImageMagick is already at revision $IMAGEMAGICK_REVISION, skipping build."
@@ -652,11 +647,9 @@ build_libvips () {
 
     SOURCE="$SOURCE_DIR/libvips"
 
-    set -e
     : "${LIBVIPS_REVISION:=$(jq -cr '.revision' "$BASE_IMG_REPO_DIR/server/sources/libvips.json")}"
-    set +e
 
-    if ! needs_recompile "libvips" "$LIBVIPS_REVISION"; then
+    if ! needs_recompile "libvips" "$LIBVIPS_REVISION" && compgen -G "/usr/local/lib/vips-modules-*/vips-jxl.so" > /dev/null; then
         echo "libvips is already at revision $LIBVIPS_REVISION, skipping build."
         return 0
     fi
@@ -675,6 +668,10 @@ build_libvips () {
     remove_build_folder "$SOURCE"
 
     meson setup build --buildtype=release --libdir=lib -Dintrospection=disabled -Dtiff=disabled
+    if ! grep -q '^#define HAVE_LIBJXL' build/config.h; then
+        echo "ERROR: libvips was configured without libjxl (JPEG XL). Check the libjxl build." >&2
+        exit 1
+    fi
     cd build
     ninja install
     ldconfig /usr/local/lib
